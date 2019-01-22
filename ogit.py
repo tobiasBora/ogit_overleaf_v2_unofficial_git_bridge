@@ -75,6 +75,15 @@ class ErrorUploadFile(OverleafException):
     a file upload"""
     pass
 
+class BadJsonFormat(OverleafException):
+    """This generic error is raised when the Json does not have the good shape."""
+
+class PathExistsButIsFile(OverleafException):
+    """Error raised when trying to create a new folder but a file already exists there."""
+
+class FileDoesNotExistSoNoRemove(OverleafException):
+    """When you try to remove a file that do not exist."""
+
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -90,7 +99,7 @@ class FileTree:
         """a path starts with a slash and ends with a slash.
         Parent_id should be None for folders."""
         # Path should start and end with /
-        if len(path) == 0:
+        if len(path) == 0 or path == "/":
             path = "/"
         else:
             if path[0] != "/":
@@ -108,8 +117,10 @@ class FileTree:
 
     def get_element(self, path_name):
         """Get the element corresponding to the given path name.
-        In case the element does not exist, return None."""
-        if len(path_name) == 0:
+        In case the element does not exist, return None.
+        In case the element exists, return a dict containing
+        the name, the path, the _id, is_file, and parent_id."""
+        if len(path_name) == 0 or path_name == "/":
             path_name = "/"
         else:
             # No / at the end of folders
@@ -280,11 +291,81 @@ class Overleaf:
         except Exception as e:
             raise BadFormatJsonListFilesFolders(e) from e
 
-    def create_folder(self, online_path):
+    def rm(self, path_name=None, _id_isfile=None, force=False):
+        """Remove a file at the given path. Specify either the path or a couple (_id,is_file).
+        If force=True, then do not raise an error if the file does not exist."""
+        if _id_isfile:
+            (_id,is_file) = _id_isfile
+        else:
+            ft = self.get_list_files_and_folders()
+            try:
+                elt = ft.get_element(path_name) or dict()
+                _id = elt['_id']
+                is_file = elt['is_file']
+            except KeyError as e:
+                logger.debug("The file {} does not exist and you try to remove it...".format(path_name or _id))
+                if force:
+                    return None
+                else:
+                    raise FileDoesNotExistSoNoRemove(e) from e
+        logger.debug("I will delete id {}.".format(_id))
+        if is_file:
+            mid_url = "doc/"
+        else:
+            mid_url = "folder/"
+        r = requests.delete("{}{}{}".format(self.url_project,
+                                            mid_url,
+                                            _id),
+                            cookies = {'overleaf_session': self.overleaf_session},
+                            headers = {'Accept': 'application/json, text/plain, */*',
+                                       'X-Csrf-Token': self.csrf_token})
+        logger.debug(r.text)
+
+
+    def mkdir(self, online_path, force=False):
         """Create (recursively if needed) a folder online"""
-        subfolders = [p for p in online_path.split() if p]
+        subfolders = [p for p in online_path.split('/') if p]
+        ft = self.get_list_files_and_folders()
+        path="/"
         for p in subfolders:
-            TODO
+            new_path = path + p + "/"
+            logger.debug("Will deal with subpath {}.".format(new_path))
+            elt = ft.get_element(new_path)
+            if elt and not elt['is_file']:
+                logger.debug("The folder {} already exist.".format(new_path))
+            if elt and elt['is_file']:
+                logger.debug("The path {} already exist BUT IS A FILE.".format(new_path))
+                if not force:
+                    raise PathExistsButIsFile
+                else:
+                    self.rm(_id_isfile = (elt['_id'], True), force=True)
+                    self.mkdir(online_path, force=force)
+            else:
+                logger.debug("The folder {} does not exist. Let's create it!".format(new_path))
+                parent_id=ft.get_element(path)['_id']
+                r = requests.post('https://www.overleaf.com/project/5c3317b393083f2e21158498/folder',
+                                  cookies = {'overleaf_session': self.overleaf_session},
+                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                             'Accept': 'application/json, text/plain, */*'},
+                                  json = {'_csrf': self.csrf_token,
+                                          'parent_folder_id': parent_id,
+                                          'name': p})
+                if "file already exists" in r.text:
+                    ### If the file already exist, it means that the file has been created meanwhile, so let's try again! (NB: that is quite unlikely to happen)
+                    logger.warning("The file {} already exists online, but wasn't on the file tree... That's strange, let's try again!")
+                    self.mkdir(online_path, force=force)
+                try:
+                    out_json = r.json()
+                    logger.debug(out_json)
+                    new_id = out_json["_id"]
+                    ft.add_element(p,
+                                   path=path,
+                                   _id=new_id,
+                                   is_file=False,
+                                   parent_id=parent_id)
+                except Exception as e:
+                    raise BadJsonFormat(e) from e
+            path = new_path
         
     def upload_file(self, online_path_name, local_path_name, force_reload=False):
         if not self.file_tree or force_reload:
@@ -295,12 +376,16 @@ class Overleaf:
         if not filename:
             raise ErrorUploadFile("The path {} does not have a valid filename.".format(online_path_name))
         path_id = self.file_tree.get_element(online_path)
-        if not path_id:
+        # if not path_id:
             # TODO: create folder
         r = requests.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id, csrf_token),
                           cookies = {'overleaf_session': overleaf_session},
                           # data=payload,
                   files = {'qqfile': ('othermain.tex', open('/tmp/d/main.tex', 'rb'))})
 
-        
-Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_list_files_and_folders()
+
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_zip()
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_list_files_and_folders()
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/ogit/script/")
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/aa.txt")
+Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').rm("/bb.txt")
