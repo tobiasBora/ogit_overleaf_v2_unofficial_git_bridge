@@ -600,8 +600,10 @@ class Overleaf:
                 self.file_tree.remove_element(dst_folder_canon + prefix + src_elt['name'])
         logger.info("### File {} has been moved successfully to folder {}{}".format(src, dst_folder, "and renamed to " + new_name if new_name else ""))
 
-    def upload_file(self, local_path_name, online_path_name, force=False, force_reload=True):
-        """Upload of file located on local_path_name on the online path online_path_name. If force==True, create the folder brutally by erasing any exising file/folder."""
+    def upload_file(self, online_path_name, local_path_name=None, string_content=None, force=False, force_reload=True):
+        """Upload of file located on local_path_name on the online path online_path_name. If force==True, create the folder brutally by erasing any exising file/folder.
+        If no local_path_name is provided, then send the content of "string" as file.
+        """
         ft = self.ls(force_reload=force_reload)
         if online_path_name[0] != "/":
             online_path_name = "/" + online_path_name
@@ -621,9 +623,10 @@ class Overleaf:
                 raise ImpossibleError("Mkdir didn't created a folder at {}, please report the error!".format(online_path_name))
         logger.debug("path_id: {}".format(path_id))
         # Upload the file
+        content = open(local_path_name, 'rb') if local_path_name else string_content
         r = requests.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id['_id'], self.csrf_token),
                           cookies = {'overleaf_session': self.overleaf_session},
-                  files = {'qqfile': (online_filename, open(local_path_name, 'rb'))})
+                  files = {'qqfile': (online_filename, content)})
         logger.debug(curlify.to_curl(r.request))
         logger.debug(r.text)
         try:
@@ -661,11 +664,12 @@ o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
 # o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
 # o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
 # o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
-# o.upload_file("/tmp/a.txt", "/montest/fichier.txt", force_reload=False)
+# o.upload_file("/montest/fichier.txt", "/tmp/a.txt", force_reload=False)
 print(o.ls())
 # o.mv("/fichier.txt", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
 # o.mv("/fichier.tex", "/myfolder3/script/", force_reload=False, allow_erase=True)
 # o.mv("/myfolder3/script/fichier.tex", "", force_reload=False, allow_erase=True)
 # o.mv("/fichier.tex", "/myfolder3/script/", new_name="fichiermoved.tex", force_reload=False, allow_erase=True)
-o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
-print(o.ls())
+# o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
+# print(o.ls())
+# o.upload_file("/ogitupload/fichier.txt", string_content="I'm a content completely written in python!", force_reload=False)
