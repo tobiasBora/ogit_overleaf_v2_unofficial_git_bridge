@@ -98,6 +98,7 @@ class DstFolderIsFile(FileDoesNotExist):
     
 class ImpossibleError(OverleafException):
     """This class of error are raised when an error should not occur. For example mkdir with force=True should create a folder..."""
+    
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -225,7 +226,7 @@ class Overleaf:
                 except KeyError:
                     raise ConnectException(out_json)
             self.overleaf_session = r.cookies["overleaf_session"]
-            logger.info("The good overleaf session is {}".format(self.overleaf_session))
+            logger.debug("The good overleaf session is {}".format(self.overleaf_session))
             if self.overleaf_session[0:2] != "s%":
                 logger.warning("The overleaf session does not start with s%, which is quite unusual...")
         except OverleafException:
@@ -357,7 +358,8 @@ class Overleaf:
 
 
     def mkdir(self, online_path, force=False, force_reload=True, nb_retry=1):
-        """Create (recursively if needed) a folder online"""
+        """Create (recursively if needed) a folder online.
+        if force=True, will remove any existing file that would be in place of the folder."""
         subfolders = [p for p in online_path.split('/') if p]
         ft = self.ls(force_reload=force_reload)
         path="/"
@@ -511,34 +513,66 @@ class Overleaf:
                 dst_folder_canon = self.file_tree.get_canon_path(dst_folder, should_finish_slash=True)
                 self.file_tree.remove_element(dst_folder_canon + src_elt['name'])
             
-    def upload_file(self, online_path_name, local_path_name, force_reload=True):
-        self.ls(force_reload=force_reload)
+    def upload_file(self, local_path_name, online_path_name, force=False, force_reload=True):
+        """Upload of file located on local_path_name on the online path online_path_name. If force==True, create the folder brutally by erasing any exising file/folder."""
+        ft = self.ls(force_reload=force_reload)
         if online_path_name[0] != "/":
             online_path_name = "/" + online_path_name
         online_path, online_filename = ntpath.split(online_path_name)
-        if not filename:
-            raise ErrorUploadFile("The path {} does not have a valid filename.".format(online_path_name))
-        path_id = self.file_tree.get_element(online_path)
-        # if not path_id:
-            # TODO: create folder
-        r = requests.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id, csrf_token),
-                          cookies = {'overleaf_session': overleaf_session},
-                          # data=payload,
-                  files = {'qqfile': ('othermain.tex', open('/tmp/d/main.tex', 'rb'))})
-
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_zip()
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').ls()
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/ogit/script/")
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/aa.txt")
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').rm("/bb.txt")
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mv("/name.tex", "/myfolder3/script/")
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mv("/myfolder3/script/", "/")
+        logger.debug("online_path: {}".format(online_path))
+        logger.debug("online_filename: {}".format(online_filename))
+        if not online_filename:
+            raise ErrorUploadFile("The online path {} does not have a valid filename.".format(online_path_name))
+        path_id = ft.get_element(online_path)
+        if not path_id:
+            # If the folder does not exist, create it
+            self.mkdir(online_path,
+                       force=force,
+                       force_reload=force_reload)
+            path_id = ft.get_element(online_path)
+            if not path_id or path_id['file_type'] != 'folder':
+                raise ImpossibleError("Mkdir didn't created a folder at {}, please report the error!".format(online_path_name))
+        logger.debug("path_id: {}".format(path_id))
+        # Upload the file
+        r = requests.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id['_id'], self.csrf_token),
+                          cookies = {'overleaf_session': self.overleaf_session},
+                  files = {'qqfile': (online_filename, open(local_path_name, 'rb'))})
+        logger.debug(curlify.to_curl(r.request))
+        logger.debug(r.text)
+        try:
+            out_json = r.json()
+            if not out_json['success']:
+                logger.debug("An unknown error occured during uploading. Please fill a bug report.")
+                raise ErrorUploadFile(r.text)
+            new_id = out_json['entity_id']
+            file_type = out_json['entity_type']
+            if force_reload:
+                self.ls()
+            else:
+                self.file_tree.add_element(name=online_filename,
+                                           path=online_path,
+                                           _id=new_id,
+                                           file_type=file_type,
+                                           parent_id=path_id['_id'])
+            logger.info("### Successful upload of file {} at online path {}.".format(local_path_name, online_path_name))
+        except KeyError as e:
+            logger.debug("An unknown error occured during uploading. Please fill a bug report.")
+            raise ErrorUploadFile(r.text) from e
+            
 o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
-print(o.ls())
-print("Let's start to play :D")
-#o.mv("/name.tex", "/myfolder3/script/", force_reload=False)
-#o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
-#o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
-#o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
-#o.mv("/name.tex", "/myfolder3/script/", new_name="name_ren.tex", force_reload=False)
+# o.get_zip()
+# o.ls()
+# o.mkdir("/ogit/script/")
+# o.mkdir("/aa.txt")
+# o.rm("/bb.txt")
+# o.mv("/name.tex", "/myfolder3/script/")
+# o.mv("/myfolder3/script/", "/")
+# print(o.ls())
+# print("Let's start to play :D")
+# o.mv("/name.tex", "/myfolder3/script/", force_reload=False)
+# o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
+# o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
+# o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
+# o.mv("/name.tex", "/myfolder3/script/", new_name="name_ren.tex", force_reload=False)
+o.upload_file("/tmp/a.txt", "/montest/fichier.txt", force_reload=False)
 
