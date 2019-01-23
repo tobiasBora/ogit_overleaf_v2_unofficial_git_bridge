@@ -84,7 +84,7 @@ class PathExistsButIsFile(OverleafException):
 
 class FileDoesNotExist(OverleafException):
     """Generic error when a file does not exist"""
-    
+
 class FileDoesNotExistSoNoRemove(FileDoesNotExist):
     """When you try to remove a file that does not exist."""
 
@@ -102,7 +102,7 @@ class FileErasureNotAllowed(OverleafException):
 
 class ImpossibleError(OverleafException):
     """This class of error are raised when an error should not occur. For example mkdir with force=True should create a folder..."""
-    
+
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -145,7 +145,7 @@ class FileTree:
             '_id': _id,
             'file_type': file_type,
             'parent_id': parent_id}
-        
+
     def get_element(self, path_name):
         """Get the element corresponding to the given path name.
         In case the element does not exist, return None.
@@ -172,7 +172,7 @@ class FileTree:
                               if d['file_type'] != 'folder'
                               else " (Dir ") + d['_id'] +  ")\n"
         return s
-            
+
 ##############################
 ### Class that deals with the overleaf website
 ##############################
@@ -648,28 +648,37 @@ class Overleaf:
         except KeyError as e:
             logger.debug("An unknown error occured during uploading. Please fill a bug report.")
             raise ErrorUploadFile(r.text) from e
-            
-o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
-# o.get_zip()
-# o.ls()
-# o.mkdir("/ogit/script/")
-# o.mkdir("/aa.txt")
-# o.rm("/bb.txt")
-# o.mv("/name.tex", "/myfolder3/script/")
-# o.mv("/myfolder3/script/", "/")
-# print(o.ls())
-# print("Let's start to play :D")
-# o.mv("/name.tex", "/myfolder3/script/", force_reload=False)
-# o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
-# o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
-# o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
-# o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
-# o.upload_file("/montest/fichier.txt", "/tmp/a.txt", force_reload=False)
-print(o.ls())
-# o.mv("/fichier.txt", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
-# o.mv("/fichier.tex", "/myfolder3/script/", force_reload=False, allow_erase=True)
-# o.mv("/myfolder3/script/fichier.tex", "", force_reload=False, allow_erase=True)
-# o.mv("/fichier.tex", "/myfolder3/script/", new_name="fichiermoved.tex", force_reload=False, allow_erase=True)
-# o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
-# print(o.ls())
-# o.upload_file("/ogitupload/fichier.txt", string_content="I'm a content completely written in python!", force_reload=False)
+
+def demo_overleaf():
+    o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
+    # o.get_zip()
+    # o.ls()
+    # o.mkdir("/ogit/script/")
+    # o.mkdir("/aa.txt")
+    # o.rm("/bb.txt")
+    # o.mv("/name.tex", "/myfolder3/script/")
+    # o.mv("/myfolder3/script/", "/")
+    # print(o.ls())
+    # print("Let's start to play :D")
+    # o.mv("/name.tex", "/myfolder3/script/", force_reload=False)
+    # o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
+    # o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
+    # o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
+    # o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
+    # o.upload_file("/montest/fichier.txt", "/tmp/a.txt", force_reload=False)
+    print(o.ls())
+    # o.mv("/fichier.txt", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
+    # o.mv("/fichier.tex", "/myfolder3/script/", force_reload=False, allow_erase=True)
+    # o.mv("/myfolder3/script/fichier.tex", "", force_reload=False, allow_erase=True)
+    # o.mv("/fichier.tex", "/myfolder3/script/", new_name="fichiermoved.tex", force_reload=False, allow_erase=True)
+    # o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
+    # print(o.ls())
+    # o.upload_file("/ogitupload/fichier.txt", string_content="I'm a content completely written in python!", force_reload=False)
+demo_overleaf()
+
+##############################
+### Git integration
+##############################
+
+
+
