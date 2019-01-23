@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# pip install bs4 curlify websocket-client
 from bs4 import BeautifulSoup
 import json
 import requests
@@ -10,6 +10,7 @@ from websocket import create_connection # websocket-client
 import logging
 import zipfile
 import ntpath
+from datetime import datetime
 
 ##############################
 ### Logger
@@ -134,7 +135,7 @@ class FileTree:
     def add_element(self, name, path, _id, file_type, parent_id=None):
         """a path starts with a slash and ends with a slash.
         file_type can be either folder, file, or doc.
-        Parent_id should be None for folders."""
+        Parent_id should be None for root folders."""
         path = self.get_canon_path(path, should_finish_slash=True)
         # name should not contain '/'
         name = name.replace("/", "")
@@ -260,7 +261,8 @@ class Overleaf:
         file tree.
         """
         if self.file_tree and not force_reload:
-            logger.debug("The file tree already exists, and we don't force to reload, so I'll provide the same file_tree as before: {}".format(self.file_tree))
+            logger.debug("The file tree already exists, and we don't force to reload, so I'll provide the same file_tree as before")
+            logger.spam("{}".format(self.file_tree))
             return self.file_tree
         logger.info("#### Getting list of files and folders of the project {}".format(self.url_project))
         try:
@@ -302,7 +304,7 @@ class Overleaf:
                                path = path,
                                _id = current_folder_id,
                                file_type = "folder",
-                               parent_id = None)
+                               parent_id = parent_id)
                 # Add the subfolders
                 if name == "":
                     newpath = path
@@ -357,6 +359,7 @@ class Overleaf:
                             cookies = {'overleaf_session': self.overleaf_session},
                             headers = {'Accept': 'application/json, text/plain, */*',
                                        'X-Csrf-Token': self.csrf_token})
+        self.file_tree.remove_element(path_name)
         logger.debug(r.text)
 
 
@@ -419,7 +422,11 @@ class Overleaf:
     def mv(self, src, dst_folder, new_name=None, create_folder=False, allow_erase=False, force=False, force_reload=True, nb_retry=1):
         """Move src to dst_folder, and eventually change
         the name to new_name. It can move both files and folders.
-        If force=True, do not raise an error even if the input file does not exist."""
+        If force=True, do not raise an error even if the input file does not exist"""
+        ### Sorry the code of this function is ugly, but tries to deal with as many case/errors
+        ### as possible... (and I didn't think it would be that complex before actually writing it)
+        ### If I've the time I may try to rewrite it in a better way
+        logger.debug("I will try to move file {} to folder {}{}.".format(src, dst_folder, "with name " + new_name if new_name else ""))
         ft = self.ls(force_reload=force_reload)
         src_elt = ft.get_element(src)
         if not src_elt:
@@ -438,8 +445,13 @@ class Overleaf:
                     force_reload=force_reload,
                     nb_retry=nb_retry-1)
         mid_url = src_elt['file_type'] + "/"
+        # Make sure that new_name is setup only if we really change the folder name
+        if new_name == src_elt['name']:
+            new_name = None
+        # Deal with destination folder
         dst_elt = ft.get_element(dst_folder)
         if not dst_elt:
+            logger.warning("The dst folder {} does not exist. ".format(dst_folder))
             # The dst folder does not exist...
             if not create_folder:
                 raise DstFolderDoesNotExistSoNoMove(dst_folder)
@@ -451,6 +463,7 @@ class Overleaf:
                 logger.error("Mkdir failed! Please do a bug report.")
                 raise ImpossibleError("Mkdir didn't create the file, please do a but report.")
         if dst_elt['file_type'] != "folder":
+            # The dst is a file instead of a folder
             logger.warning('The dst {} you are trying to move to is a file, not a folder!'.format(dst_folder))
             if not allow_erase:
                 raise DstFolderIsFile(dst_folder)
@@ -463,13 +476,18 @@ class Overleaf:
             if not dst_elt or dst_elt['file_type'] != 'folder':
                 logger.error("rm/mkdir failed! Please do a bug report.")
                 raise ImpossibleError("rm or mkdir didn't create the file, please do a but report.")
-        # Check if we need to remove the output file before moving
+        # Check if the destination file is not the same file (else do nothing)
         dst_folder_canon = self.file_tree.get_canon_path(dst_folder, should_finish_slash=True)
         final_dst = dst_folder_canon + (new_name or src_elt['name'])
+        if src == final_dst:
+            logger.debug("The source and destination are equal.")
+            # The move does not move in fact
+            return None
+        ##### Check if we need to remove the output file before moving
         remove_later = False
         if self.file_tree.get_element(final_dst):
             logger.debug("File {} exists, so an erasure would be needed.".format(final_dst))
-            # We would need to remove the file
+            # We need to remove the file
             if not allow_erase:
                 raise FileErasureNotAllowed("File {} already exists.".format(final_dst))
             if not new_name:
@@ -477,36 +495,83 @@ class Overleaf:
                 self.rm(final_dst, force=True, force_reload=force_reload)
             else:
                 remove_later = True
-        # Check if the intermediate move won't remove another file
-        #### TODO: do a 3 steps to move files.
-        # Move first the file to the folder
-        logger.debug("I will move the file {} to the folder {}".format(src, dst_folder))
-        url = '{}{}{}/move'.format(self.url_project,
-                                   mid_url,
-                                   src_elt['_id'])
-        r = requests.post(url,
-                          cookies = {'overleaf_session': self.overleaf_session},
-                          headers = {'Content-Type': 'application/json;charset=UTF-8',
-                                     'Accept': 'application/json, text/plain, */*'},
-                          json = {'folder_id': dst_elt['_id'],
-                                  '_csrf': self.csrf_token})
-        if r.text:
-            # Error, as r.text should output nothing
-            logger.debug(curlify.to_curl(r.request))
-            logger.warning("Very strange, the move request shouldn't  output anything!")
-            logger.debug(r.text)
-            raise ImpossibleError(r)
-        if force_reload:
-            self.ls(force_reload=True)
-        else:
-            self.file_tree.add_element(name=src_elt['name'],
-                                       path=dst_folder,
-                                       _id=src_elt['_id'],
-                                       file_type=src_elt['file_type'],
-                                       parent_id=dst_elt['_id'])
-            self.file_tree.remove_element(src)
-        # Rename file if needed
-        if new_name:
+        ##########################
+        #### Move file if needed
+        src_path_no_slash, src_filename = ntpath.split(src)
+        src_path_slash = src_path_no_slash + "/" if len(src) == 0 or src_path_no_slash[-1] != "/" else src_path_no_slash
+        # If the destination of the intermediate move already exists, we don't want to erase it
+        # so we will first rename the file by prepending a prefix, and then move it.
+        prefix = ""
+        if dst_folder_canon != src_path_slash:
+            # We need to do an intermediate move first
+            logger.debug("We will first do an intermediave move")
+            ##### Check if the intermediate move won't remove another file
+            prefix_int = 0
+            while (self.file_tree.get_element(dst_folder_canon + prefix + src_elt['name'])
+                   or (prefix != "" and self.file_tree.get_element(src_path_slash + prefix + src_elt['name']))):
+                logger.debug("An element already exists with prefix '{}' and name {}, either in folder {} or {}. Let's change the prefix:".format(prefix, src_elt['name'], dst_folder_canon, src_path_slash))
+                logger.debug(self.file_tree)
+                prefix_int += 1
+                prefix = str(prefix_int) + "_"
+            ##########################
+            #### Pre-rename the file if needed
+            if prefix:
+                logger.debug("We will now pre-rename the file {} with the prefix {}.".format(src, prefix))
+                url = '{}{}{}/rename'.format(self.url_project,
+                                             mid_url,
+                                             src_elt['_id'])
+                r = requests.post(url,
+                                  cookies = {'overleaf_session': self.overleaf_session},
+                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                             'Accept': 'application/json, text/plain, */*'},
+                                  json = {'name': prefix + src_elt['name'],
+                                          '_csrf': self.csrf_token})
+                if r.text:
+                    # Error, as r.text should output nothing
+                    logger.debug(curlify.to_curl(r.request))
+                    logger.warning("Very strange, the rename request shouldn't  output anything!")
+                    logger.debug(r.text)
+                    raise ImpossibleError(r)
+                if force_reload:
+                    self.ls(force_reload=True)
+                else:
+                    self.file_tree.add_element(name=prefix + src_elt['name'],
+                                               path=src_path_slash,
+                                               _id=src_elt['_id'],
+                                               file_type=src_elt['file_type'],
+                                               parent_id=src_elt['parent_id'])
+                    self.file_tree.remove_element(src)
+                logger.debug("pre-renaming finished.")
+            ##### Move the file to the folder (cannot change the name)
+            logger.debug("I will move the file {} to the folder {}".format(src_path_slash + prefix + src_elt['name'], dst_folder))
+            url = '{}{}{}/move'.format(self.url_project,
+                                       mid_url,
+                                       src_elt['_id'])
+            r = requests.post(url,
+                              cookies = {'overleaf_session': self.overleaf_session},
+                              headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                         'Accept': 'application/json, text/plain, */*'},
+                              json = {'folder_id': dst_elt['_id'],
+                                      '_csrf': self.csrf_token})
+            if r.text:
+                # Error, as r.text should output nothing
+                logger.debug(curlify.to_curl(r.request))
+                logger.warning("Very strange, the move request shouldn't  output anything!")
+                logger.debug(r.text)
+                raise ImpossibleError(r)
+            if force_reload:
+                self.ls(force_reload=True)
+            else:
+                self.file_tree.add_element(name=prefix + src_elt['name'],
+                                           path=dst_folder,
+                                           _id=src_elt['_id'],
+                                           file_type=src_elt['file_type'],
+                                           parent_id=dst_elt['_id'])
+                self.file_tree.remove_element(src_path_slash + prefix + src_elt['name'])
+        ##########################
+        #### Rename file if needed
+        if new_name and new_name != src_filename:
+            logger.debug("We will now rename the file")
             if remove_later:
                 self.rm(final_dst, force=True, force_reload=force_reload)
             url = '{}{}{}/rename'.format(self.url_project,
@@ -521,7 +586,7 @@ class Overleaf:
             if r.text:
                 # Error, as r.text should output nothing
                 logger.debug(curlify.to_curl(r.request))
-                logger.warning("Very strange, the move request shouldn't  output anything!")
+                logger.warning("Very strange, the rename request shouldn't  output anything!")
                 logger.debug(r.text)
                 raise ImpossibleError(r)
             if force_reload:
@@ -532,9 +597,9 @@ class Overleaf:
                                            _id=src_elt['_id'],
                                            file_type=src_elt['file_type'],
                                            parent_id=dst_elt['_id'])
-                self.file_tree.remove_element(dst_folder_canon + src_elt['name'])
+                self.file_tree.remove_element(dst_folder_canon + prefix + src_elt['name'])
         logger.info("### File {} has been moved successfully to folder {}{}".format(src, dst_folder, "and renamed to " + new_name if new_name else ""))
-            
+
     def upload_file(self, local_path_name, online_path_name, force=False, force_reload=True):
         """Upload of file located on local_path_name on the online path online_path_name. If force==True, create the folder brutally by erasing any exising file/folder."""
         ft = self.ls(force_reload=force_reload)
@@ -595,6 +660,12 @@ o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
 # o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
 # o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
 # o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
-o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
+# o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
 # o.upload_file("/tmp/a.txt", "/montest/fichier.txt", force_reload=False)
-
+print(o.ls())
+# o.mv("/fichier.txt", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
+# o.mv("/fichier.tex", "/myfolder3/script/", force_reload=False, allow_erase=True)
+# o.mv("/myfolder3/script/fichier.tex", "", force_reload=False, allow_erase=True)
+# o.mv("/fichier.tex", "/myfolder3/script/", new_name="fichiermoved.tex", force_reload=False, allow_erase=True)
+o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
+print(o.ls())
