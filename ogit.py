@@ -26,9 +26,9 @@ logging.Logger.spam = spam
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
-# logger.setLevel(logging.INFO)
+logger.setLevel(logging.INFO)
 # logger.setLevel(logging.DEBUG)
-logger.setLevel(logging.SPAM)
+# logger.setLevel(logging.SPAM)
 
 ##############################
 ### Exceptions
@@ -81,9 +81,23 @@ class BadJsonFormat(OverleafException):
 class PathExistsButIsFile(OverleafException):
     """Error raised when trying to create a new folder but a file already exists there."""
 
-class FileDoesNotExistSoNoRemove(OverleafException):
-    """When you try to remove a file that do not exist."""
+class FileDoesNotExist(OverleafException):
+    """Generic error when a file does not exist"""
+    
+class FileDoesNotExistSoNoRemove(FileDoesNotExist):
+    """When you try to remove a file that does not exist."""
 
+class FileDoesNotExistSoNoMove(FileDoesNotExist):
+    """When you try to move a file that does not exist."""
+
+class DstFolderDoesNotExistSoNoMove(FileDoesNotExist):
+    """When you try to move a file to a folder that does not exist."""
+
+class DstFolderIsFile(FileDoesNotExist):
+    """The dst folder is a file!"""
+    
+class ImpossibleError(OverleafException):
+    """This class of error are raised when an error should not occur. For example mkdir with force=True should create a folder..."""
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -95,49 +109,63 @@ class FileTree:
     def __init__(self):
         self.l = dict()
 
-    def add_element(self, name, path, _id, is_file, parent_id=None):
-        """a path starts with a slash and ends with a slash.
-        Parent_id should be None for folders."""
+    def get_canon_path(self, path_name, should_finish_slash=False):
+        """Depending on the context, path should have a trailing slash (in ['path']) or not (in key). Get the canonical version of a path!"""
         # Path should start and end with /
-        if len(path) == 0 or path == "/":
-            path = "/"
+        if len(path_name) == 0 or path_name == "/":
+            return "/"
         else:
-            if path[0] != "/":
-                path = "/" + path
-            if path[-1] != "/":
-                path = path + "/"
+            if should_finish_slash:
+               if path_name[-1] != "/":
+                   path_name += "/"
+            else:
+                # No / at the end of folders
+                if path_name[-1] == "/":
+                    path_name = path_name[:-1]
+            # path starts with /
+            if path_name[0] != "/":
+                path_name = "/" + path_name
+            return path_name
+
+    def add_element(self, name, path, _id, file_type, parent_id=None):
+        """a path starts with a slash and ends with a slash.
+        file_type can be either folder, file, or doc.
+        Parent_id should be None for folders."""
+        path = self.get_canon_path(path, should_finish_slash=True)
         # name should not contain '/'
         name = name.replace("/", "")
         self.l[path + name] = {
             'name': name,
             'path': path,
             '_id': _id,
-            'is_file': is_file,
+            'file_type': file_type,
             'parent_id': parent_id}
-
+        
     def get_element(self, path_name):
         """Get the element corresponding to the given path name.
         In case the element does not exist, return None.
         In case the element exists, return a dict containing
-        the name, the path, the _id, is_file, and parent_id."""
-        if len(path_name) == 0 or path_name == "/":
-            path_name = "/"
-        else:
-            # No / at the end of folders
-            if path_name[-1] == "/":
-                path_name = path_name[:-1]
-            # path starts with /
-            if path_name[0] != "/":
-                path_name = "/" + path_name
+        the name, the path, the _id, file_type (folder, file, or doc), and parent_id."""
+        path_name = self.get_canon_path(path_name,
+                                        should_finish_slash=False)
         try:
             return self.l[path_name]
         except KeyError:
             return None
 
+    def remove_element(self, path_name, no_error=True):
+        path_name = self.get_canon_path(path_name)
+        if no_error:
+            self.l.pop(path_name, True)
+        else:
+            self.l.pop(path_name)
+
     def __str__(self):
         s = ""
         for path_name, d in self.l.items():
-            s += path_name + (" (File)" if d['is_file'] else " (Dir)") + "\n"
+            s += path_name + (" (File "
+                              if d['file_type'] != 'folder'
+                              else " (Dir ") + d['_id'] +  ")\n"
         return s
             
 ##############################
@@ -222,11 +250,14 @@ class Overleaf:
             logger.error(err)
             raise BadZip(err)
 
-    def get_list_files_and_folders(self):
+    def ls(self, force_reload=True):
         """This function gets the list of files and folders on the
         online overleaf website, and sets self.file_tree to the associated
         file tree.
         """
+        if self.file_tree and not force_reload:
+            logger.debug("The file tree already exists, and we don't force to reload, so I'll provide the same file_tree as before: {}".format(self.file_tree))
+            return self.file_tree
         logger.info("#### Getting list of files and folders of the project {}".format(self.url_project))
         try:
             r = requests.get('https://www.overleaf.com/socket.io/1/',
@@ -266,7 +297,7 @@ class Overleaf:
                 ft.add_element(name=name,
                                path = path,
                                _id = current_folder_id,
-                               is_file = False,
+                               file_type = "folder",
                                parent_id = None)
                 # Add the subfolders
                 if name == "":
@@ -278,11 +309,17 @@ class Overleaf:
                                    path=newpath,
                                    parent_id=json_folders['_id'])
                 # Add the files in "docs"
-                for doc in json_folders['docs'] + json_folders['fileRefs']:
+                for doc in json_folders['docs']:
                     ft.add_element(name = doc['name'],
-                                   path = path,
+                                   path = newpath,
                                    _id = doc['_id'],
-                                   is_file = True,
+                                   file_type = 'doc',
+                                   parent_id = current_folder_id)
+                for doc in json_folders['fileRefs']:
+                    ft.add_element(name = doc['name'],
+                                   path = newpath,
+                                   _id = doc['_id'],
+                                   file_type = 'file',
                                    parent_id = current_folder_id)
             iterate_folder(rootFolderJson)
             self.file_tree = ft
@@ -291,17 +328,17 @@ class Overleaf:
         except Exception as e:
             raise BadFormatJsonListFilesFolders(e) from e
 
-    def rm(self, path_name=None, _id_isfile=None, force=False):
-        """Remove a file at the given path. Specify either the path or a couple (_id,is_file).
+    def rm(self, path_name=None, _id_filetype=None, force=False, force_reload=True):
+        """Remove a file at the given path. Specify either the path or a couple (_id,file_type).
         If force=True, then do not raise an error if the file does not exist."""
-        if _id_isfile:
-            (_id,is_file) = _id_isfile
+        if _id_filetype:
+            (_id,file_type) = _id_filetype
         else:
-            ft = self.get_list_files_and_folders()
+            ft = self.ls(force_reload=force_reload)
             try:
                 elt = ft.get_element(path_name) or dict()
                 _id = elt['_id']
-                is_file = elt['is_file']
+                file_type = elt['file_type']
             except KeyError as e:
                 logger.debug("The file {} does not exist and you try to remove it...".format(path_name or _id))
                 if force:
@@ -309,10 +346,7 @@ class Overleaf:
                 else:
                     raise FileDoesNotExistSoNoRemove(e) from e
         logger.debug("I will delete id {}.".format(_id))
-        if is_file:
-            mid_url = "doc/"
-        else:
-            mid_url = "folder/"
+        mid_url = elt['file_type'] + "/"
         r = requests.delete("{}{}{}".format(self.url_project,
                                             mid_url,
                                             _id),
@@ -322,24 +356,27 @@ class Overleaf:
         logger.debug(r.text)
 
 
-    def mkdir(self, online_path, force=False):
+    def mkdir(self, online_path, force=False, force_reload=True, nb_retry=1):
         """Create (recursively if needed) a folder online"""
         subfolders = [p for p in online_path.split('/') if p]
-        ft = self.get_list_files_and_folders()
+        ft = self.ls(force_reload=force_reload)
         path="/"
         for p in subfolders:
             new_path = path + p + "/"
             logger.debug("Will deal with subpath {}.".format(new_path))
             elt = ft.get_element(new_path)
-            if elt and not elt['is_file']:
-                logger.debug("The folder {} already exist.".format(new_path))
-            if elt and elt['is_file']:
-                logger.debug("The path {} already exist BUT IS A FILE.".format(new_path))
-                if not force:
-                    raise PathExistsButIsFile
+            if elt:
+                if elt['file_type'] == 'folder':
+                    logger.debug("The folder {} already exist.".format(new_path))
                 else:
-                    self.rm(_id_isfile = (elt['_id'], True), force=True)
-                    self.mkdir(online_path, force=force)
+                    logger.debug("The path {} already exist BUT IS A FILE.".format(new_path))
+                    if not force:
+                        raise PathExistsButIsFile
+                    else:
+                        self.rm(_id_isfile = (elt['_id'], True), force=True, force_reload=force_reload)
+                        self.mkdir(online_path,
+                                   force=force,
+                                   force_reload=force_reload)
             else:
                 logger.debug("The folder {} does not exist. Let's create it!".format(new_path))
                 parent_id=ft.get_element(path)['_id']
@@ -351,9 +388,16 @@ class Overleaf:
                                           'parent_folder_id': parent_id,
                                           'name': p})
                 if "file already exists" in r.text:
-                    ### If the file already exist, it means that the file has been created meanwhile, so let's try again! (NB: that is quite unlikely to happen)
-                    logger.warning("The file {} already exists online, but wasn't on the file tree... That's strange, let's try again!")
-                    self.mkdir(online_path, force=force)
+                    ### If the file already exist, it means that the file has been created meanwhile, so let's try again! (NB: that is quite unlikely to happen when force_reload=False)
+                    if nb_retry <= 0:
+                        logger.warning("The file {} already exists online, but wasn't on the file tree after several tries... That's REALLY strange, so if you see this warning, please do a report!")
+                        return
+                    logger.warning("The file {} already exists online, but wasn't on the file tree... That's strange, let's try again! Note that this should NOT loop, else please do a bug report.")
+                    self.ls(force_reload=True)
+                    self.mkdir(online_path,
+                               force=force,
+                               force_reload=force_reload,
+                               nb_retry=nb_retry-1)
                 try:
                     out_json = r.json()
                     logger.debug(out_json)
@@ -361,15 +405,114 @@ class Overleaf:
                     ft.add_element(p,
                                    path=path,
                                    _id=new_id,
-                                   is_file=False,
+                                   file_type='folder',
                                    parent_id=parent_id)
                 except Exception as e:
                     raise BadJsonFormat(e) from e
             path = new_path
-        
-    def upload_file(self, online_path_name, local_path_name, force_reload=False):
-        if not self.file_tree or force_reload:
-            self.get_list_files_and_folders()
+
+    def mv(self, src, dst_folder, new_name=None, create_folder=False, create_folder_even_if_erase=False, force=False, force_reload=True, nb_retry=1):
+        """Move src to dst_folder, and eventually change
+        the name to new_name. It can move both files and folders.
+        If force=True, do not raise an error even if the input file does not exist."""
+        ft = self.ls(force_reload=force_reload)
+        src_elt = ft.get_element(src)
+        if not src_elt:
+            # The src file does not exist...
+            if nb_retry <= 0 or force_reload == True:
+                logger.error("Cannot move the file {}, it does not exist.".format(src))
+                if force:
+                    return
+                raise FileDoesNotExistSoNoMove(src)
+            logger.error("The file seems to be non-existant. Let's reload and try again.")
+            self.ls(force_reload = True)
+            self.mv(src,
+                    dst_folder,
+                    new_name,
+                    create_folder=create_folder,
+                    force_reload=force_reload,
+                    nb_retry=nb_retry-1)
+        mid_url = src_elt['file_type'] + "/"
+        dst_elt = ft.get_element(dst_folder)
+        if not dst_elt:
+            # The dst folder does not exist...
+            if not create_folder:
+                raise DstFolderDoesNotExistSoNoMove(dst_folder)
+            self.mkdir(dst_folder,
+                       force=True,
+                       force_reload=force_reload)
+            dst_elt = ft.get_element(dst_folder)
+            if not dst_elt:
+                logger.error("Mkdir failed! Please do a bug report.")
+                raise ImpossibleError("Mkdir didn't create the file, please do a but report.")
+        if dst_elt['file_type'] != "folder":
+            logger.warning('The dst {} you are trying to move to is a file, not a folder!'.format(dst_folder))
+            if not create_folder_even_if_erase:
+                raise DstFolderIsFile(dst_folder)
+            logger.warning('We will erase this file and create another one instead...')
+            self.rm(dst_folder, force=True, force_reload=True)
+            self.mkdir(dst_folder,
+                       force=True,
+                       force_reload=force_reload)
+            dst_elt = ft.get_element(dst_folder)
+            if not dst_elt or dst_elt['file_type'] != 'folder':
+                logger.error("rm/mkdir failed! Please do a bug report.")
+                raise ImpossibleError("rm or mkdir didn't create the file, please do a but report.")
+        logger.debug("I will move the file {} to the folder {}".format(src, dst_folder))
+        url = '{}{}{}/move'.format(self.url_project,
+                                   mid_url,
+                                   src_elt['_id'])
+        r = requests.post(url,
+                          cookies = {'overleaf_session': self.overleaf_session},
+                          headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                     'Accept': 'application/json, text/plain, */*'},
+                          json = {'folder_id': dst_elt['_id'],
+                                  '_csrf': self.csrf_token})
+        if r.text:
+            # Error, as r.text should output nothing
+            logger.debug(curlify.to_curl(r.request))
+            logger.warning("Very strange, the move request shouldn't  output anything!")
+            logger.debug(r.text)
+            raise ImpossibleError(r)
+        if force_reload:
+            self.ls(force_reload=True)
+        else:
+            self.file_tree.add_element(name=src_elt['name'],
+                                       path=dst_folder,
+                                       _id=src_elt['_id'],
+                                       file_type=src_elt['file_type'],
+                                       parent_id=dst_elt['_id'])
+            self.file_tree.remove_element(src)
+        # Rename file if needed
+        if new_name:
+            url = '{}{}{}/rename'.format(self.url_project,
+                                         mid_url,
+                                         src_elt['_id'])
+            r = requests.post(url,
+                              cookies = {'overleaf_session': self.overleaf_session},
+                              headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                         'Accept': 'application/json, text/plain, */*'},
+                              json = {'name': new_name,
+                                      '_csrf': self.csrf_token})
+            if r.text:
+                # Error, as r.text should output nothing
+                logger.debug(curlify.to_curl(r.request))
+                logger.warning("Very strange, the move request shouldn't  output anything!")
+                logger.debug(r.text)
+                raise ImpossibleError(r)
+            if force_reload:
+                self.ls(force_reload=True)
+            else:
+                self.file_tree.add_element(name=new_name,
+                                           path=dst_folder,
+                                           _id=src_elt['_id'],
+                                           file_type=src_elt['file_type'],
+                                           parent_id=dst_elt['_id'])
+                dst_folder_canon = self.file_tree.get_canon_path(dst_folder, should_finish_slash=True)
+                self.file_tree.remove_element(dst_folder_canon + src_elt['name'])
+            
+    def upload_file(self, online_path_name, local_path_name, force_reload=True):
+        self.ls(force_reload=force_reload)
         if online_path_name[0] != "/":
             online_path_name = "/" + online_path_name
         online_path, online_filename = ntpath.split(online_path_name)
@@ -383,9 +526,19 @@ class Overleaf:
                           # data=payload,
                   files = {'qqfile': ('othermain.tex', open('/tmp/d/main.tex', 'rb'))})
 
-
 # Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_zip()
-# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').get_list_files_and_folders()
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').ls()
 # Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/ogit/script/")
 # Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mkdir("/aa.txt")
-Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').rm("/bb.txt")
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').rm("/bb.txt")
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mv("/name.tex", "/myfolder3/script/")
+# Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/').mv("/myfolder3/script/", "/")
+o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
+print(o.ls())
+print("Let's start to play :D")
+#o.mv("/name.tex", "/myfolder3/script/", force_reload=False)
+#o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
+#o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
+#o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
+#o.mv("/name.tex", "/myfolder3/script/", new_name="name_ren.tex", force_reload=False)
+
