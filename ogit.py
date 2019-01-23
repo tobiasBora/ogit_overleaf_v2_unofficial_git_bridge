@@ -26,8 +26,8 @@ logging.Logger.spam = spam
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
-logger.setLevel(logging.INFO)
-# logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 # logger.setLevel(logging.SPAM)
 
 ##############################
@@ -95,7 +95,10 @@ class DstFolderDoesNotExistSoNoMove(FileDoesNotExist):
 
 class DstFolderIsFile(FileDoesNotExist):
     """The dst folder is a file!"""
-    
+
+class FileErasureNotAllowed(OverleafException):
+    """We need to erase a file and we are not 'allowed' (in parameters) to erase stuff."""
+
 class ImpossibleError(OverleafException):
     """This class of error are raised when an error should not occur. For example mkdir with force=True should create a folder..."""
     
@@ -413,7 +416,7 @@ class Overleaf:
                     raise BadJsonFormat(e) from e
             path = new_path
 
-    def mv(self, src, dst_folder, new_name=None, create_folder=False, create_folder_even_if_erase=False, force=False, force_reload=True, nb_retry=1):
+    def mv(self, src, dst_folder, new_name=None, create_folder=False, allow_erase=False, force=False, force_reload=True, nb_retry=1):
         """Move src to dst_folder, and eventually change
         the name to new_name. It can move both files and folders.
         If force=True, do not raise an error even if the input file does not exist."""
@@ -449,7 +452,7 @@ class Overleaf:
                 raise ImpossibleError("Mkdir didn't create the file, please do a but report.")
         if dst_elt['file_type'] != "folder":
             logger.warning('The dst {} you are trying to move to is a file, not a folder!'.format(dst_folder))
-            if not create_folder_even_if_erase:
+            if not allow_erase:
                 raise DstFolderIsFile(dst_folder)
             logger.warning('We will erase this file and create another one instead...')
             self.rm(dst_folder, force=True, force_reload=True)
@@ -460,6 +463,23 @@ class Overleaf:
             if not dst_elt or dst_elt['file_type'] != 'folder':
                 logger.error("rm/mkdir failed! Please do a bug report.")
                 raise ImpossibleError("rm or mkdir didn't create the file, please do a but report.")
+        # Check if we need to remove the output file before moving
+        dst_folder_canon = self.file_tree.get_canon_path(dst_folder, should_finish_slash=True)
+        final_dst = dst_folder_canon + (new_name or src_elt['name'])
+        remove_later = False
+        if self.file_tree.get_element(final_dst):
+            logger.debug("File {} exists, so an erasure would be needed.".format(final_dst))
+            # We would need to remove the file
+            if not allow_erase:
+                raise FileErasureNotAllowed("File {} already exists.".format(final_dst))
+            if not new_name:
+                # we can remove the file now
+                self.rm(final_dst, force=True, force_reload=force_reload)
+            else:
+                remove_later = True
+        # Check if the intermediate move won't remove another file
+        #### TODO: do a 3 steps to move files.
+        # Move first the file to the folder
         logger.debug("I will move the file {} to the folder {}".format(src, dst_folder))
         url = '{}{}{}/move'.format(self.url_project,
                                    mid_url,
@@ -487,6 +507,8 @@ class Overleaf:
             self.file_tree.remove_element(src)
         # Rename file if needed
         if new_name:
+            if remove_later:
+                self.rm(final_dst, force=True, force_reload=force_reload)
             url = '{}{}{}/rename'.format(self.url_project,
                                          mid_url,
                                          src_elt['_id'])
@@ -510,8 +532,8 @@ class Overleaf:
                                            _id=src_elt['_id'],
                                            file_type=src_elt['file_type'],
                                            parent_id=dst_elt['_id'])
-                dst_folder_canon = self.file_tree.get_canon_path(dst_folder, should_finish_slash=True)
                 self.file_tree.remove_element(dst_folder_canon + src_elt['name'])
+        logger.info("### File {} has been moved successfully to folder {}{}".format(src, dst_folder, "and renamed to " + new_name if new_name else ""))
             
     def upload_file(self, local_path_name, online_path_name, force=False, force_reload=True):
         """Upload of file located on local_path_name on the online path online_path_name. If force==True, create the folder brutally by erasing any exising file/folder."""
@@ -573,6 +595,6 @@ o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
 # o.mv("/myfolder3/script/name.tex", "/", force_reload=False)
 # o.mv("/myfolder3/script/cren.zip", "/", force_reload=False)
 # o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
-# o.mv("/name.tex", "/myfolder3/script/", new_name="name_ren.tex", force_reload=False)
-o.upload_file("/tmp/a.txt", "/montest/fichier.txt", force_reload=False)
+o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
+# o.upload_file("/tmp/a.txt", "/montest/fichier.txt", force_reload=False)
 
