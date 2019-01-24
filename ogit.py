@@ -136,7 +136,10 @@ class RunsInOgitRepo(GitException):
 
 class ErrorDuringMerge(GitException):
     """When an error occurs during the merge (merge conflict...)"""
-    
+
+class DirtyRepository(GitException):
+    """When an error occurs during the merge (merge conflict...)"""
+
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -773,6 +776,9 @@ class ConfProject:
     def get_overleaf_branch_name(self):
         return self.conf_dict.get('overleaf_branch_name', 'overleaf')
 
+    def get_force_reload(self):
+        return self.conf_dict.get('ls_force_reload', False)
+
     def get_overleaf(self):
         return Overleaf(
             url_project=self.get_url_project(),
@@ -951,7 +957,7 @@ def ogit_opull(confproject, other_arguments=[]):
     ogit_ofetch(confproject)
     return run_interactive_command(["git", "merge", confproject.get_overleaf_branch_name()] + other_arguments)
 
-def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
+def ogit_opush_force(confproject, should_merge_back=True):
     """Force to push everything online without pulling first"""
     logger.info("Let's push the files online...")
     repo = get_repo()
@@ -965,9 +971,12 @@ def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
             logger.info("Will send file {}".format(filename))
             overleaf.upload_file(filename,
                                  local_path_name=filename,
-                                 force=True)
+                                 force=True,
+                                 force_reload=confproject.get_force_reload())
         ### Then remove unused files
-        ft = overleaf.ls()
+        ft = overleaf.ls(
+            force_reload=confproject.get_force_reload()
+        )
         online_files = [f.strip("/")
                         for f in ft.get_list_files()
                         if f]
@@ -978,7 +987,7 @@ def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
                 logger.info("Will remove file {}".format(filename))
                 overleaf.rm("/" + filename,
                             force=True,
-                            force_reload=force_reload)
+                            force_reload=confproject.get_force_reload())
         ### Then remove unused folders
         online_folders = [f.strip("/")
                           for f in ft.get_list_folders()
@@ -989,11 +998,11 @@ def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
             # ... if not, remove it!
             if not [ f
                      for f in files_to_send
-                     if f.startswith(folder) ]:
+                     if f.startswith(folder + "/") ]:
                 logger.info("Will remove folder {}".format(folder))
                 overleaf.rm("/" + folder,
                             force=True,
-                            force_reload=force_reload)
+                            force_reload=confproject.get_force_reload())
         logger.info("Push successful")
         if not should_merge_back:
             return 0
@@ -1005,17 +1014,21 @@ def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
             return run_interactive_command(["git", "merge", old_branch])
 
 
-def ogit_opush(confproject, other_arguments=[], force_reload=False):
+def ogit_opush(confproject, allow_dirty_repo=False, other_arguments=[]):
     """In order to avoid to get lose of information during push,
     we force the user to first do a pull."""
+    repo = get_repo()
+    if repo.is_dirty() and not allow_dirty_repo:
+        txt = "This repository is dirty, please commit or stash before pushing."
+        logger.error(txt)
+        raise DirtyRepository(txt)
     logger.debug("Let's first pull before pushing notification")
     res_code = ogit_opull(confproject,
                           other_arguments=other_arguments)
     if res_code != 0:
         logger.error("An error occured during the merge, so we won't push anything.")
         raise ErrorDuringMerge()
-    return ogit_opush_force(confproject=confproject,
-                            force_reload=force_reload)
+    return ogit_opush_force(confproject=confproject)
 
 def ogit_oremote_add(url_project, email, password, force=False):
     """
@@ -1045,6 +1058,6 @@ def demo_git():
     confproject = ConfProject()
     # ogit_ofetch(confproject)
     # ogit_opull(confproject)
-    # ogit_opush(confproject)
-    ogit_opush_force(confproject, should_merge_back=False)
+    ogit_opush(confproject)
+    # ogit_opush_force(confproject, should_merge_back=False)
 demo_git()
