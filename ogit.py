@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # pip install bs4 curlify websocket-client gitpython
-
+## TODOs:
+# - clarify info given by logger.info (no information about merge for example)
+# - write the cli
 from bs4 import BeautifulSoup
 import json
 import requests
@@ -34,8 +36,8 @@ logging.Logger.spam = spam
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
-# logger.setLevel(logging.INFO)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+# logger.setLevel(logging.DEBUG)
 # logger.setLevel(logging.SPAM)
 
 ##############################
@@ -234,11 +236,12 @@ class Overleaf:
         self.overleaf_session = None
         self.csrf_token = None
         self.file_tree = None
-        self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project?")
+        self.url_project = url_project or os.environ.get("URL_PROJECT") or input("What is the url of the project?")
         if self.url_project[-1] != "/":
-            self.url_project = url_project + "/"
+            self.url_project = self.url_project + "/"
         else:
-            self.url_project = url_project
+            self.url_project = self.url_project
+        self.project_id = self.url_project.split("/")[-2]
         self._connect() # sets old_overleaf_session and csrf_token
 
     def _connect(self):
@@ -330,7 +333,7 @@ class Overleaf:
                 resp = ws.recv()
                 logger.debug("I received: {}".format(resp))
                 if resp[0] =='5':
-                    to_send = """5:1+::{"name":"joinProject","args":[{"project_id":"5c3317b393083f2e21158498"}]}"""
+                    to_send = '5:1+::{"name":"joinProject","args":[{"project_id":"' + self.project_id + '"}]}'
                     logger.debug("I'll send:{}".format(to_send))
                     ws.send(to_send)
                 if resp[0] ==  '6':
@@ -407,6 +410,7 @@ class Overleaf:
                             cookies = {'overleaf_session': self.overleaf_session},
                             headers = {'Accept': 'application/json, text/plain, */*',
                                        'X-Csrf-Token': self.csrf_token})
+        logger.debug(curlify.to_curl(r.request))
         self.file_tree.remove_element(path_name)
         logger.debug(r.text)
 
@@ -436,13 +440,14 @@ class Overleaf:
             else:
                 logger.debug("The folder {} does not exist. Let's create it!".format(new_path))
                 parent_id=ft.get_element(path)['_id']
-                r = requests.post('https://www.overleaf.com/project/5c3317b393083f2e21158498/folder',
+                r = requests.post(self.url_project + 'folder',
                                   cookies = {'overleaf_session': self.overleaf_session},
                                   headers = {'Content-Type': 'application/json;charset=UTF-8',
                                              'Accept': 'application/json, text/plain, */*'},
                                   json = {'_csrf': self.csrf_token,
                                           'parent_folder_id': parent_id,
                                           'name': p})
+                logger.debug(curlify.to_curl(r.request))
                 if "file already exists" in r.text:
                     ### If the file already exist, it means that the file has been created meanwhile, so let's try again! (NB: that is quite unlikely to happen when force_reload=False)
                     if nb_retry <= 0:
@@ -455,6 +460,7 @@ class Overleaf:
                                force_reload=force_reload,
                                nb_retry=nb_retry-1)
                 try:
+                    logger.spam(r.text)
                     out_json = r.json()
                     logger.debug(out_json)
                     new_id = out_json["_id"]
@@ -714,7 +720,6 @@ def demo_overleaf():
     # o.mv("/cren.zip", "/myfolder3/script/", new_name="cren_rename_ogit.zip", force_reload=False)
     # o.mv("/othermain.tex", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
     # o.upload_file("/montest/fichier.txt", "/tmp/a.txt", force_reload=False)
-    print(o.ls())
     # o.mv("/fichier.txt", "/myfolder3/script/", new_name="fichier.txt", force_reload=False, allow_erase=True)
     # o.mv("/fichier.tex", "/myfolder3/script/", force_reload=False, allow_erase=True)
     # o.mv("/myfolder3/script/fichier.tex", "", force_reload=False, allow_erase=True)
@@ -722,7 +727,7 @@ def demo_overleaf():
     # o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
     # print(o.ls())
     # o.upload_file("/ogitupload/fichier.txt", string_content="I'm a content completely written in python!", force_reload=False)
-#demo_overleaf()
+# demo_overleaf()
 
 ##############################
 ### Configuration project
@@ -989,9 +994,10 @@ def ogit_opush_force(confproject, should_merge_back=True):
                             force=True,
                             force_reload=confproject.get_force_reload())
         ### Then remove unused folders
-        online_folders = [f.strip("/")
-                          for f in ft.get_list_folders()
-                          if f]
+        # Make sure to remove '/' else you break completely the project!
+        online_folders = [ f.strip("/")
+                           for f in ft.get_list_folders()
+                           if f.strip("/") ]
         logger.debug("online_folders: {}".format(online_folders))
         for folder in online_folders:
             # Check if the folder appears in the sent files
@@ -1001,8 +1007,8 @@ def ogit_opush_force(confproject, should_merge_back=True):
                      if f.startswith(folder + "/") ]:
                 logger.info("Will remove folder {}".format(folder))
                 overleaf.rm("/" + folder,
-                            force=True,
-                            force_reload=confproject.get_force_reload())
+                           force=True,
+                           force_reload=confproject.get_force_reload())
         logger.info("Push successful")
         if not should_merge_back:
             return 0
