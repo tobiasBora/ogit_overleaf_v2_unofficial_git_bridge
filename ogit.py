@@ -752,8 +752,9 @@ class ConfProject:
                  json_string=None,
                  json_file=None,
                  try_to_find_conf=True,
-                 url_project=None, email=None, password=None):
-        """You can either provide nothing and wait for the prompt (or use the environment variables), or give a dictionnary, or give a json string, or give a json filename, or give manually the 3 mandatory parameters.
+                 url_project=None, email=None, password=None,
+                 args=None):
+        """You can either provide nothing and wait for the prompt (or use the environment variables), or give a dictionnary, or give a json string, or give a json filename, or give manually the 3 mandatory parameters. Or directly the args from the command line.
         The dict/json/... have:
         mandatory:
         - url_project
@@ -782,7 +783,6 @@ class ConfProject:
                     self.conf_dict = json.load(f)
         if not self.conf_dict:
             self.conf_dict = dict()
-        logger.debug("The dict before questions is {}".format(self.conf_dict))
         # Load project url
         self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project? ")
         self.email = email or self.conf_dict.get('email') or os.environ.get("OVERLEAF_EMAIL") or input("email? ")
@@ -916,7 +916,7 @@ class OverleafRepo():
         os.chdir(self.repo.working_tree_dir)
         return {'repo': self.repo,
                 'old_branch': self.old_branch}
-        
+
     def __exit__(self, type, value, traceback):
         logger.debug("Let's go back to branch {}".format(self.old_branch))
         self.repo.heads[self.old_branch].checkout()
@@ -941,11 +941,13 @@ class cd:
     def __exit__(self, etype, value, traceback):
         os.chdir(self.savedPath)
 
-def ogit_ofetch(confproject=ConfProject()):
+def ogit_ofetch(confproject=None, args=None):
     """
     Will simulate a kind of fetch on the overleaf branch, and
     basically sync this branch with the online overleaf version.
     """
+    if not confproject:
+        confproject = ConfProject(args=args)
     with OverleafRepo(confproject=confproject) as repo_dict:
         repo = repo_dict['repo']
         # Find a good destination folder for files
@@ -998,17 +1000,21 @@ def ogit_ofetch(confproject=ConfProject()):
             # Remove only the extracted folder
             shutil.rmtree(extract_dir)
 
-def ogit_opull(confproject=ConfProject(), other_arguments=[]):
+def ogit_opull(confproject=None, other_arguments=[], args=None):
     """
     This function will first fetch/sync the overleaf project into
     the branch, and then will merge the overleaf branch with the
     current branch.
     """
+    if not confproject:
+        confproject = ConfProject(args=args)
     ogit_ofetch(confproject)
     return run_interactive_command(["git", "merge", confproject.get_overleaf_branch_name()] + other_arguments)
 
-def ogit_opush_force(confproject=ConfProject(), should_merge_back=True):
+def ogit_opush_force(confproject=None, should_merge_back=True, args=None):
     """Force to push everything online without pulling first"""
+    if not confproject:
+        confproject = ConfProject(args=args)
     logger.info("Let's push the files online...")
     repo = get_repo()
     overleaf = confproject.get_overleaf()
@@ -1065,9 +1071,11 @@ def ogit_opush_force(confproject=ConfProject(), should_merge_back=True):
             return run_interactive_command(["git", "merge", old_branch])
 
 
-def ogit_opush(confproject=ConfProject(), allow_dirty_repo=False, other_arguments=[]):
+def ogit_opush(confproject=None, allow_dirty_repo=False, other_arguments=[], args=None):
     """In order to avoid to get lose of information during push,
     we force the user to first do a pull."""
+    if not confproject:
+        confproject = ConfProject(args=args)
     repo = get_repo()
     if repo.is_dirty() and not allow_dirty_repo:
         txt = "This repository is dirty, please commit or stash before pushing."
@@ -1081,7 +1089,7 @@ def ogit_opush(confproject=ConfProject(), allow_dirty_repo=False, other_argument
         raise ErrorDuringMerge()
     return ogit_opush_force(confproject=confproject)
 
-def ogit_oremote_add(confproject=None, do_nothing_if_exists=None):
+def ogit_oremote_add(confproject=None, do_nothing_if_exists=None, args=None):
     """
     """
     try:
@@ -1104,7 +1112,7 @@ def ogit_oremote_add(confproject=None, do_nothing_if_exists=None):
     logger.info("The configuration file has been saved info {}".format(path_to_save))
     return confproject
 
-def ogit_oclone(confproject=None):
+def ogit_oclone(confproject=None, args=None):
     """
     This function basically clones the overleaf project into a new
     git project. If you already have an existing git project,
@@ -1134,5 +1142,60 @@ def demo_git():
     # ogit_opush_force(confproject, should_merge_back=False)
     # ogit_oclone()
     # ogit_opush()
-demo_git()
+    pass
+#demo_git()
 
+
+def usage():
+    print("Usage: not yet written, see readme!")
+
+##############################
+### Command Line Interface
+##############################
+
+def main():
+    parser = argparse.ArgumentParser(description='ogit: Free git bridge between overleaf v2 and git')
+    subparsers = parser.add_subparsers(help='Possible commands:', dest='command')
+
+    parser.add_argument("-v", choices=['INFO', 'DEBUG', 'SPAM'])
+
+    # oclone
+    parser_oclone = subparsers.add_parser('oclone', help='Simulate a clone for an overleaf project')
+    parser_oclone.set_defaults(func=ogit_oclone)
+
+    # oremote_add
+    parser_oremote_add = subparsers.add_parser('oremote_add', help='Add/replace the overleaf project url and user configuration and save it.')
+    parser_oremote_add.set_defaults(func=ogit_oremote_add)
+
+    # opush
+    parser_opush = subparsers.add_parser('opush', help="First run opull to merge the online content on the current branch, and then push the modifications online if no conflict occurs (and merge the current branch back to the overleaf's reserved branch)")
+    parser_opush.set_defaults(func=ogit_opush)
+
+    # opush_force
+    parser_opush_force = subparsers.add_parser('opush_force', help='Like opush, but does not do the opull first.')
+    parser_opush_force.set_defaults(func=ogit_opush_force)
+
+    # opull
+    parser_opull = subparsers.add_parser('opull', help="Download the content from overleaf, put it on the overleaf's reserved_branch, and merge this branch with the current branch.")
+    parser_opull.set_defaults(func=ogit_opull)
+
+    # ofetch
+    parser_ofetch = subparsers.add_parser('ofetch', help="Download the content from overleaf, and put in on the overleaf's reserved branch. If you want to merge, see opull")
+    parser_ofetch.set_defaults(func=ogit_ofetch)
+
+    # # XXX
+    # parser_XXX = subparsers.add_parser('XXX', help='YYY')
+    # parser_XXX.set_defaults(func=ogit_XXX)
+
+    # Help sub-command
+    parser_help = subparsers.add_parser('help', help='help me!')
+    parser_help.set_defaults(func=lambda args: parser.print_help())
+
+    args = parser.parse_args()
+    if hasattr(args, 'func'):
+        args.func(args=args)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
