@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# pip install bs4 curlify websocket-client
+# pip install bs4 curlify websocket-client gitpython
+
 from bs4 import BeautifulSoup
 import json
 import requests
@@ -10,7 +11,11 @@ from websocket import create_connection # websocket-client
 import logging
 import zipfile
 import ntpath
+from pathlib import Path
 from datetime import datetime
+import git
+import shutil
+from distutils.dir_util import copy_tree
 
 ##############################
 ### Logger
@@ -30,6 +35,12 @@ logging.basicConfig(format=FORMAT)
 # logger.setLevel(logging.INFO)
 logger.setLevel(logging.DEBUG)
 # logger.setLevel(logging.SPAM)
+
+##############################
+### Constants
+##############################
+
+GIT_OVERLEAF_BRANCH="overleaf"
 
 ##############################
 ### Exceptions
@@ -102,6 +113,24 @@ class FileErasureNotAllowed(OverleafException):
 
 class ImpossibleError(OverleafException):
     """This class of error are raised when an error should not occur. For example mkdir with force=True should create a folder..."""
+
+
+class GitException(OverleafException):
+    """All exception linked with git"""
+
+class NoGitRepo(GitException):
+    """When no git repo exists."""
+
+class BareRepoNotSupported(GitException):
+    """When no git repo exists."""
+
+class NoOverleafBranchExists(GitException):
+    """If no overleaf branch exists."""
+
+class RunsInOgitRepo(GitException):
+    """When the user forgot to change folder, he will run
+    the script in the git folder of ogit... Which is usually
+    not what he wants to do."""
 
 ##############################
 ### Way to represent a file/folder in overleaf
@@ -180,14 +209,15 @@ class FileTree:
 class Overleaf:
     """This class will be the one interacting with the
     overleaf online's website."""
-    def __init__(self, url_project, email=None, password=None):
+    def __init__(self, url_project=None, email=None, password=None):
         self.email = email or os.environ.get("OVERLEAF_EMAIL") or input("email? ")
-        self.password = os.environ.get("OVERLEAF_PASSWORD") or getpass("password? ")
+        self.password = password or os.environ.get("OVERLEAF_PASSWORD") or getpass("password? ")
         self.old_overleaf_session = None
         self.overleaf_session = None
         self.csrf_token = None
         self.file_tree = None
-        if url_project[-1] != "/":
+        self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project?")
+        if self.url_project[-1] != "/":
             self.url_project = url_project + "/"
         else:
             self.url_project = url_project
@@ -650,7 +680,7 @@ class Overleaf:
             raise ErrorUploadFile(r.text) from e
 
 def demo_overleaf():
-    o = Overleaf('https://www.overleaf.com/project/5c3317b393083f2e21158498/')
+    o = Overleaf()
     # o.get_zip()
     # o.ls()
     # o.mkdir("/ogit/script/")
@@ -674,11 +704,235 @@ def demo_overleaf():
     # o.mv("/fichiermoved.tex", "/myfolder3/script/", new_name="fichierrenamed.tex", force_reload=False, allow_erase=True)
     # print(o.ls())
     # o.upload_file("/ogitupload/fichier.txt", string_content="I'm a content completely written in python!", force_reload=False)
-demo_overleaf()
+#demo_overleaf()
 
+##############################
+### Configuration project
+##############################
+
+class ConfProject:
+    def __init__(self,
+                 conf_dict=None,
+                 json=None,
+                 json_file=None,
+                 url_project=None, email=None, password=None):
+        """You can either provide nothing and wait for the prompt (or use the environment variables), or give a dictionnary, or give a json string, or give a json filename, or give manually the 3 mandatory parameters.
+        The dict/json/... have:
+        mandatory:
+        - url_project
+        - email
+        - password
+        facultative:
+        - TODO: fill
+        """
+        self.conf_dict = conf_dict
+        # If provide json string
+        if not conf_dict and json:
+            self.conf_dict = json.loads(json)
+        # If provide json filename
+        if not conf_dict and json_file:
+            with open(json_file) as f:
+                self.conf_dict = json.load(f)
+        if not conf_dict:
+            self.conf_dict = dict()
+        # Load project url
+        self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project?")
+        self.email = email or self.conf_dict.get('email') or os.environ.get("OVERLEAF_EMAIL") or input("email? ")
+        self.password = password or self.conf_dict.get('password') or os.environ.get("OVERLEAF_PASSWORD") or getpass("password? ")
+
+    def get_url_project(self):
+        return self.url_project
+
+    def get_email(self):
+        return self.email
+
+    def get_password(self):
+        return self.password
+
+    def have_svg(self):
+        return self.conf_dict.get('have_svg', True)
+
+    def get_svg_path(self):
+        return self.conf_dict.get('svg_path', '.ogit_svg')
+
+    def get_overleaf_branch_name(self):
+        return self.conf_dict.get('overleaf_branch_name', 'overleaf')
+
+    def get_overleaf(self):
+        return Overleaf(
+            url_project=self.get_url_project(),
+            email=self.get_email(),
+            password=self.get_password()
+        )
+    
 ##############################
 ### Git integration
 ##############################
 
+def get_repo():
+    cwd = os.getcwd()
+    try:
+        repo = git.Repo(cwd, search_parent_directories=True)
+        logger.debug("I found a repo in {} whose working dir is {}.".format(cwd, repo.working_tree_dir))
+        if repo.bare:
+            raise BareRepoNotSupported()
+        return repo
+    except git.InvalidGitRepositoryError:
+        raise NoGitRepo("No git repository found in {}".format(cwd))
+
+def overleaf_branch_exists():
+    """Return True if the overleaf branch actually exist"""
+    repo = get_repo()
+    return GIT_OVERLEAF_BRANCH in [b.name for b in repo.branchs]
+    
+class OverleafRepo():
+    """This class needs to be used with the 'with' keyword
+    to make sure that the repository is sent back to it's
+    original state. Should use it like:
+    with OverleafRepo(repo) as repo:
+    """
+    def __init__(self, repo=None, confproject=None, overleaf_branch=GIT_OVERLEAF_BRANCH, warning_run_in_ogit_folder=True):
+        self.repo = repo or get_repo()
+        self.overleaf_branch = confproject.get_overleaf_branch_name() if confproject else overleaf_branch
+        if warning_run_in_ogit_folder and os.path.exists(
+                os.path.join(self.repo.working_tree_dir,
+                             'should_not_run_ogit_here.txt')):
+            print("WARNING:")
+            print("It seems that you are running ogit in the git")
+            print("repository of ogit, while usually you should")
+            print("create an other git repo, and call ogit from")
+            print("this other git repo.")
+            yes_no = input("Are you sure you want to continue?[y/N]")
+            if yes_no.lower() not in ["y", "yes"]:
+                raise RunsInOgitRepo()
+        
+    def __enter__(self):
+        self.cwd = os.getcwd()
+        # Make sure at least one thing has been commited,
+        # else it's not possible to create a new branch and
+        # come back on master after that.
+        if not self.repo.heads:
+            logger.info("No branch exists, creating an empty commit to initialize the repository")
+            # No branch
+            if self.repo.is_dirty():
+                self.repo.git.stash("push")
+                self.repo.index.commit("First (empty) commit")
+                self.repo.git.stash("pop")
+            else:
+                self.repo.index.commit("First (empty) commit")
+        self.old_branch = self.repo.active_branch.name
+        # Make sure the overleaf branch exists
+        if not self.overleaf_branch in [b.name
+                                        for b in self.repo.branches]:
+            logger.info("Branch {} didn't exist, I will create it.".format(self.overleaf_branch))
+            self.repo.git.checkout('-b', self.overleaf_branch)
+        logger.debug("Currently on branch {}, I will stash push everything.".format(self.old_branch))
+        ## `git stash push --all` does not push anything if nothing
+        ## has been modified so we first check if there is
+        ## anything to push:
+        self.must_push_pop = self.repo.is_dirty(untracked_files=True)
+        if self.must_push_pop:
+            logger.debug("I will run: git stash push --all")
+            self.repo.git.stash("push", "--all")
+        else:
+            logger.debug("Nothing to stash.")
+        logger.debug("I'll go to branch {}".format(self.overleaf_branch))
+        self.repo.heads[self.overleaf_branch].checkout()
+        os.chdir(self.repo.working_tree_dir)
+        return self.repo
+        
+    def __exit__(self, type, value, traceback):
+        logger.debug("Let's go back to branch {}".format(self.old_branch))
+        self.repo.heads[self.old_branch].checkout()
+        if self.must_push_pop:
+            logger.debug("Let's run: git stash pop")
+            self.repo.git.stash("pop")
+        logger.debug("Let's go now to {}".format(self.cwd))
+        os.chdir(self.cwd)
 
 
+def ogit_ofetch(confproject):
+    """
+    Will simulate a kind of fetch on the overleaf branch, and
+    basically sync this branch with the online overleaf version.
+    """
+    with OverleafRepo(confproject=confproject) as repo:
+        # Find a good destination folder for files
+        d = datetime.now()
+        base_name_hour = d.strftime("%Y_%m_%d_-_%H_%M_%S")
+        base_name = base_name_hour
+        current_svg_folder = os.path.join(confproject.get_svg_path(),
+                                          base_name)
+        i = 0
+        while os.path.exists(current_svg_folder):
+            i += 1
+            base_name = "{}_-_{}".format(base_name_hour, i)
+            current_svg_folder = os.path.join(confproject.get_svg_path(),
+                                              base_name)
+        should_keep_root_svg = os.path.exists(confproject.get_svg_path())
+        file_zip = os.path.join(current_svg_folder,
+                                base_name + ".zip")
+        os.makedirs(current_svg_folder, exist_ok=True)
+        overleaf = confproject.get_overleaf()
+        overleaf.get_zip(outputfile=file_zip)
+        # Extract the zip file
+        extract_dir = os.path.join(current_svg_folder, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(file_zip,"r") as zip_ref:
+            zip_ref.extractall(extract_dir)
+        # Remove all the files created by git:
+        repo.git.rm("-r", "-f", "--ignore-unmatch", ".")
+        # Copy all files
+        copy_tree(extract_dir, repo.working_tree_dir)
+        # Add all these files
+        os.chdir(extract_dir)
+        files_to_add = []
+        for f in Path(".").glob('**/*'):
+            if f.is_file():
+                files_to_add.append(str(f))
+        os.chdir(repo.working_tree_dir)
+        repo.index.add(files_to_add)
+        # Commit
+        if not repo.is_dirty():
+            logger.debug("No change, nothing to commit.")
+        else:
+            repo.index.commit("New version from overleaf on {}".format(d.strftime("%a. %d %B %Y, %H:%M")))
+        # If no svg is asked, remove the folder
+        if not confproject.have_svg():
+            if should_keep_root_svg:
+                shutil.rmtree(current_svg_folder)
+            else:
+                shutil.rmtree(confproject.get_svg_path())
+        else:
+            # Remove only the extracted folder
+            shutil.rmtree(extract_dir)
+    
+
+def ogit_oremote_add(url_project, email, password, force=False):
+    """
+    Use this function if you have an existing git repository in the
+    current directory, and if you would like to configure the "link"
+    between overleaf and the current repository. More precisely, this
+    function will ensure that the overleaf branch exists, and will create a file .ogit_configuration with the configuration of the project (in json format).
+    However, this function won't sync the overleaf project with the branch, see ogit_opull
+    """
+    pass
+
+def ogit_oclone(url_project, email, password):
+    """
+    This function basically clones the overleaf project into a new
+    git project. If you already have an existing git project,
+    use instead the function ogit_add_overleaf_remote.
+    More precisely, this function
+    - creates a repo
+    - creates a branch "overleaf"
+    - copy the overleaf project on the branch
+    - add/commit all the overleaf files in that branch
+    - merge this branch into master
+    """
+    pass
+
+def demo_git():
+    confproject = ConfProject()
+    ogit_ofetch(confproject)
+demo_git()
