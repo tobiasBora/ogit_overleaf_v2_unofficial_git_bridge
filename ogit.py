@@ -3,6 +3,8 @@
 ## TODOs:
 # - clarify info given by logger.info (no information about merge for example)
 # - write the cli
+# - improve configurability
+
 from bs4 import BeautifulSoup
 import json
 import requests
@@ -20,6 +22,7 @@ import shutil
 from distutils.dir_util import copy_tree
 import subprocess
 import sys
+import argparse
 
 ##############################
 ### Logger
@@ -36,9 +39,9 @@ logging.Logger.spam = spam
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO)
 # logger.setLevel(logging.DEBUG)
-# logger.setLevel(logging.SPAM)
+logger.setLevel(logging.SPAM)
 
 ##############################
 ### Constants
@@ -141,6 +144,16 @@ class ErrorDuringMerge(GitException):
 
 class DirtyRepository(GitException):
     """When an error occurs during the merge (merge conflict...)"""
+
+class GitRepoAlreadyExist(GitException):
+    """Run this error during cloning if a repo already exists."""
+
+class ProjectConfException(OverleafException):
+    """Run this error during cloning if a repo already exists."""
+
+class ProjectConfAlreadExist(ProjectConfException):
+    """Run this error during cloning if a repo already exists."""
+
 
 ##############################
 ### Way to represent a file/folder in overleaf
@@ -736,8 +749,9 @@ def demo_overleaf():
 class ConfProject:
     def __init__(self,
                  conf_dict=None,
-                 json=None,
+                 json_string=None,
                  json_file=None,
+                 try_to_find_conf=True,
                  url_project=None, email=None, password=None):
         """You can either provide nothing and wait for the prompt (or use the environment variables), or give a dictionnary, or give a json string, or give a json filename, or give manually the 3 mandatory parameters.
         The dict/json/... have:
@@ -750,18 +764,32 @@ class ConfProject:
         """
         self.conf_dict = conf_dict
         # If provide json string
-        if not conf_dict and json:
-            self.conf_dict = json.loads(json)
+        if not self.conf_dict and json_string:
+            self.conf_dict = json.loads(json_string)
         # If provide json filename
-        if not conf_dict and json_file:
+        if not self.conf_dict and json_file:
             with open(json_file) as f:
                 self.conf_dict = json.load(f)
-        if not conf_dict:
+        # Try to get the configuration file directly
+        if not self.conf_dict and try_to_find_conf:
+            try:
+                repo = git.Repo(".")
+                path_to_look = os.path.join(repo.working_tree_dir, ".ogit_confproject")
+            except git.InvalidGitRepositoryError:
+                path_to_look = ".ogit_confproject"
+            if os.path.isfile(path_to_look):
+                with open(path_to_look) as f:
+                    self.conf_dict = json.load(f)
+        if not self.conf_dict:
             self.conf_dict = dict()
+        logger.debug("The dict before questions is {}".format(self.conf_dict))
         # Load project url
-        self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project?")
+        self.url_project = url_project or self.conf_dict.get('url_project') or os.environ.get("URL_PROJECT") or input("What is the url of the project? ")
         self.email = email or self.conf_dict.get('email') or os.environ.get("OVERLEAF_EMAIL") or input("email? ")
         self.password = password or self.conf_dict.get('password') or os.environ.get("OVERLEAF_PASSWORD") or getpass("password? ")
+        self.conf_dict['url_project'] = self.url_project
+        self.conf_dict['email'] = self.email
+        self.conf_dict['password'] = self.password
 
     def get_url_project(self):
         return self.url_project
@@ -790,7 +818,24 @@ class ConfProject:
             email=self.get_email(),
             password=self.get_password()
         )
-    
+
+    def get_path_to_save(self):
+        try:
+            repo = git.Repo(".")
+            logger.debug("We are in a repository")
+            return os.path.join(repo.working_tree_dir, ".ogit_confproject")
+        except git.InvalidGitRepositoryError:
+            logger.debug("We are not in a repository")
+            return ".ogit_confproject"
+
+    def save(self, outfile=None):
+        """This function save the confproject into a file (as json)"""
+        outfile = outfile or self.get_path_to_save()
+        logger.debug("Will save dict {}".format(self.conf_dict))
+        with open(outfile, 'w', encoding='utf-8') as outfile:
+            json.dump(self.conf_dict, outfile)
+        logger.info("Configuration file saved in {}".format(outfile))
+
 ##############################
 ### Git integration
 ##############################
@@ -814,7 +859,7 @@ def overleaf_branch_exists():
     """Return True if the overleaf branch actually exist"""
     repo = get_repo()
     return GIT_OVERLEAF_BRANCH in [b.name for b in repo.branchs]
-    
+
 class OverleafRepo():
     """This class needs to be used with the 'with' keyword
     to make sure that the repository is sent back to it's
@@ -835,7 +880,7 @@ class OverleafRepo():
             yes_no = input("Are you sure you want to continue?[y/N]")
             if yes_no.lower() not in ["y", "yes"]:
                 raise RunsInOgitRepo()
-        
+
     def __enter__(self):
         self.cwd = os.getcwd()
         # Make sure at least one thing has been commited,
@@ -895,8 +940,8 @@ class cd:
 
     def __exit__(self, etype, value, traceback):
         os.chdir(self.savedPath)
-        
-def ogit_ofetch(confproject):
+
+def ogit_ofetch(confproject=ConfProject()):
     """
     Will simulate a kind of fetch on the overleaf branch, and
     basically sync this branch with the online overleaf version.
@@ -953,7 +998,7 @@ def ogit_ofetch(confproject):
             # Remove only the extracted folder
             shutil.rmtree(extract_dir)
 
-def ogit_opull(confproject, other_arguments=[]):
+def ogit_opull(confproject=ConfProject(), other_arguments=[]):
     """
     This function will first fetch/sync the overleaf project into
     the branch, and then will merge the overleaf branch with the
@@ -962,7 +1007,7 @@ def ogit_opull(confproject, other_arguments=[]):
     ogit_ofetch(confproject)
     return run_interactive_command(["git", "merge", confproject.get_overleaf_branch_name()] + other_arguments)
 
-def ogit_opush_force(confproject, should_merge_back=True):
+def ogit_opush_force(confproject=ConfProject(), should_merge_back=True):
     """Force to push everything online without pulling first"""
     logger.info("Let's push the files online...")
     repo = get_repo()
@@ -1020,7 +1065,7 @@ def ogit_opush_force(confproject, should_merge_back=True):
             return run_interactive_command(["git", "merge", old_branch])
 
 
-def ogit_opush(confproject, allow_dirty_repo=False, other_arguments=[]):
+def ogit_opush(confproject=ConfProject(), allow_dirty_repo=False, other_arguments=[]):
     """In order to avoid to get lose of information during push,
     we force the user to first do a pull."""
     repo = get_repo()
@@ -1036,17 +1081,30 @@ def ogit_opush(confproject, allow_dirty_repo=False, other_arguments=[]):
         raise ErrorDuringMerge()
     return ogit_opush_force(confproject=confproject)
 
-def ogit_oremote_add(url_project, email, password, force=False):
+def ogit_oremote_add(confproject=None, do_nothing_if_exists=None):
     """
-    Use this function if you have an existing git repository in the
-    current directory, and if you would like to configure the "link"
-    between overleaf and the current repository. More precisely, this
-    function will ensure that the overleaf branch exists, and will create a file .ogit_configuration with the configuration of the project (in json format).
-    However, this function won't sync the overleaf project with the branch, see ogit_opull
     """
-    pass
+    try:
+        repo = git.Repo(".")
+        logger.debug("We are in a repository")
+        path_to_save = os.path.join(repo.working_tree_dir, ".ogit_confproject")
+    except git.InvalidGitRepositoryError:
+        logger.debug("We are not in a repository")
+        path_to_save = ".ogit_confproject"
+    if os.path.exists(path_to_save):
+        if do_nothing_if_exists == True:
+            return None
+        elif do_nothing_if_exists == None:
+            r = input("A file .ogit_confproject already exists, do you want to continue and lose all the existing configuration?[y/N]")
+            if not r.lower in ["y", "yes"]:
+                return None
+    if not confproject:
+        confproject = ConfProject(try_to_find_conf=False)
+    confproject.save(path_to_save)
+    logger.info("The configuration file has been saved info {}".format(path_to_save))
+    return confproject
 
-def ogit_oclone(url_project, email, password):
+def ogit_oclone(confproject=None):
     """
     This function basically clones the overleaf project into a new
     git project. If you already have an existing git project,
@@ -1057,13 +1115,24 @@ def ogit_oclone(url_project, email, password):
     - copy the overleaf project on the branch
     - add/commit all the overleaf files in that branch
     - merge this branch into master
+    This is more or less equivalent to a `git init` and then ogit_pull().
     """
-    pass
+    try:
+        logger.info("Is it a repo?")
+        git.Repo(".")
+        raise GitRepoAlreadyExist("A repository already exists here, if you want to sync this existing repository with overleaf, please see ofetch and opull (opull = ofetch + merge into current branch).")
+    except git.InvalidGitRepositoryError:
+        git.Repo.init(".")
+    confproject = ogit_oremote_add(confproject=confproject)
+    ogit_opull(confproject)
 
 def demo_git():
-    confproject = ConfProject()
+    # confproject = ConfProject()
     # ogit_ofetch(confproject)
     # ogit_opull(confproject)
-    ogit_opush(confproject)
+    # ogit_opush(confproject)
     # ogit_opush_force(confproject, should_merge_back=False)
+    # ogit_oclone()
+    # ogit_opush()
 demo_git()
+
