@@ -16,6 +16,8 @@ from datetime import datetime
 import git
 import shutil
 from distutils.dir_util import copy_tree
+import subprocess
+import sys
 
 ##############################
 ### Logger
@@ -132,6 +134,9 @@ class RunsInOgitRepo(GitException):
     the script in the git folder of ogit... Which is usually
     not what he wants to do."""
 
+class ErrorDuringMerge(GitException):
+    """When an error occurs during the merge (merge conflict...)"""
+    
 ##############################
 ### Way to represent a file/folder in overleaf
 ##############################
@@ -193,6 +198,16 @@ class FileTree:
             self.l.pop(path_name, True)
         else:
             self.l.pop(path_name)
+
+    def get_list_files(self):
+        return [filename
+                for filename,elt in self.l.items()
+                if elt['file_type'] != 'folder']
+            
+    def get_list_folders(self):
+        return [filename
+                for filename,elt in self.l.items()
+                if elt['file_type'] == 'folder']
 
     def __str__(self):
         s = ""
@@ -769,6 +784,10 @@ class ConfProject:
 ### Git integration
 ##############################
 
+def run_interactive_command(args):
+    """Args is a list of arguments (including the program name), and we will plug this command into git."""
+    return subprocess.call(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+
 def get_repo():
     cwd = os.getcwd()
     try:
@@ -839,7 +858,8 @@ class OverleafRepo():
         logger.debug("I'll go to branch {}".format(self.overleaf_branch))
         self.repo.heads[self.overleaf_branch].checkout()
         os.chdir(self.repo.working_tree_dir)
-        return self.repo
+        return {'repo': self.repo,
+                'old_branch': self.old_branch}
         
     def __exit__(self, type, value, traceback):
         logger.debug("Let's go back to branch {}".format(self.old_branch))
@@ -850,13 +870,28 @@ class OverleafRepo():
         logger.debug("Let's go now to {}".format(self.cwd))
         os.chdir(self.cwd)
 
+class cd:
+    """Context manager for changing the current working directory.
+    https://stackoverflow.com/questions/431684/how-do-i-change-directory-cd-in-python
+    Usage: with cd("~/Library"):
+    """
+    def __init__(self, newPath):
+        self.newPath = os.path.expanduser(newPath)
 
+    def __enter__(self):
+        self.savedPath = os.getcwd()
+        os.chdir(self.newPath)
+
+    def __exit__(self, etype, value, traceback):
+        os.chdir(self.savedPath)
+        
 def ogit_ofetch(confproject):
     """
     Will simulate a kind of fetch on the overleaf branch, and
     basically sync this branch with the online overleaf version.
     """
-    with OverleafRepo(confproject=confproject) as repo:
+    with OverleafRepo(confproject=confproject) as repo_dict:
+        repo = repo_dict['repo']
         # Find a good destination folder for files
         d = datetime.now()
         base_name_hour = d.strftime("%Y_%m_%d_-_%H_%M_%S")
@@ -906,7 +941,81 @@ def ogit_ofetch(confproject):
         else:
             # Remove only the extracted folder
             shutil.rmtree(extract_dir)
-    
+
+def ogit_opull(confproject, other_arguments=[]):
+    """
+    This function will first fetch/sync the overleaf project into
+    the branch, and then will merge the overleaf branch with the
+    current branch.
+    """
+    ogit_ofetch(confproject)
+    return run_interactive_command(["git", "merge", confproject.get_overleaf_branch_name()] + other_arguments)
+
+def ogit_opush_force(confproject, force_reload=False, should_merge_back=True):
+    """Force to push everything online without pulling first"""
+    logger.info("Let's push the files online...")
+    repo = get_repo()
+    overleaf = confproject.get_overleaf()
+    with cd(repo.working_tree_dir):
+        files_to_send = [ filename
+                          for filename in repo.git.ls_files("-z").split('\x00')
+                          if filename ]
+        ### First send files
+        for filename in files_to_send:
+            logger.info("Will send file {}".format(filename))
+            overleaf.upload_file(filename,
+                                 local_path_name=filename,
+                                 force=True)
+        ### Then remove unused files
+        ft = overleaf.ls()
+        online_files = [f.strip("/")
+                        for f in ft.get_list_files()
+                        if f]
+        logger.debug("files_to_send: {}".format(files_to_send))
+        logger.debug("online_files: {}".format(online_files))
+        for filename in online_files:
+            if not filename in files_to_send:
+                logger.info("Will remove file {}".format(filename))
+                overleaf.rm("/" + filename,
+                            force=True,
+                            force_reload=force_reload)
+        ### Then remove unused folders
+        online_folders = [f.strip("/")
+                          for f in ft.get_list_folders()
+                          if f]
+        logger.debug("online_folders: {}".format(online_folders))
+        for folder in online_folders:
+            # Check if the folder appears in the sent files
+            # ... if not, remove it!
+            if not [ f
+                     for f in files_to_send
+                     if f.startswith(folder) ]:
+                logger.info("Will remove folder {}".format(folder))
+                overleaf.rm("/" + folder,
+                            force=True,
+                            force_reload=force_reload)
+        logger.info("Push successful")
+        if not should_merge_back:
+            return 0
+        logger.info("Let's merge back to overleaf branch!")
+        ### Merge everything back to the overleaf branch
+        with OverleafRepo(confproject=confproject) as repo_dict:
+            repo = repo_dict['repo']
+            old_branch = repo_dict['old_branch']
+            return run_interactive_command(["git", "merge", old_branch])
+
+
+def ogit_opush(confproject, other_arguments=[], force_reload=False):
+    """In order to avoid to get lose of information during push,
+    we force the user to first do a pull."""
+    logger.debug("Let's first pull before pushing notification")
+    res_code = ogit_opull(confproject,
+                          other_arguments=other_arguments)
+    if res_code != 0:
+        logger.error("An error occured during the merge, so we won't push anything.")
+        raise ErrorDuringMerge()
+    return ogit_opush_force(confproject=confproject,
+                            force_reload=force_reload)
 
 def ogit_oremote_add(url_project, email, password, force=False):
     """
@@ -934,5 +1043,8 @@ def ogit_oclone(url_project, email, password):
 
 def demo_git():
     confproject = ConfProject()
-    ogit_ofetch(confproject)
+    # ogit_ofetch(confproject)
+    # ogit_opull(confproject)
+    # ogit_opush(confproject)
+    ogit_opush_force(confproject, should_merge_back=False)
 demo_git()
