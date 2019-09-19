@@ -8,6 +8,8 @@
 from bs4 import BeautifulSoup
 import json
 import requests
+# import cookielib
+from http.cookiejar import CookieJar
 import curlify
 from getpass import getpass
 import os
@@ -255,29 +257,43 @@ class Overleaf:
         else:
             self.url_project = self.url_project
         self.project_id = self.url_project.split("/")[-2]
-        self._connect() # sets old_overleaf_session and csrf_token
+        self._connect() # sets old_overleaf_session, csrf_token, and session
 
     def _connect(self):
         # Go to the login page
+        self.session = requests.Session()
         logger.info('#### Trying to connect...')
         try:
             logger.debug('## 1) Go to login page')
-            r = requests.get('https://www.overleaf.com/login')
+            # Note the self.session instead of requests.
+            r = self.session.get('https://www.overleaf.com/login')
             soup = BeautifulSoup(r.text, "html.parser")
             self.csrf_token = soup.find('input', {'name':'_csrf'})['value']
             self.old_overleaf_session = r.cookies["overleaf_session"]
-
+            print("All cookies: {}".format(self.session.cookies))
+            
             logger.debug('The old overleaf session is {}'.format(self.old_overleaf_session))
             logger.debug('The csrf token is {}'.format(self.csrf_token))
             # Send the login informations
             logger.debug('## 2) Send the email/passwd informations')
-            r = requests.post('https://www.overleaf.com/login',
-                      cookies = {'overleaf_session': self.old_overleaf_session},
+            # self.jar = cookielib.CookieJar()
+            r = self.session.post('https://www.overleaf.com/login',
+                      # cookies = {'overleaf_session': self.old_overleaf_session},
                       headers = {'Content-Type': 'application/json;charset=UTF-8',
                                  'Accept': 'application/json, text/plain, */*'},
                       json = {'_csrf': self.csrf_token,
                               'email': self.email,
                               'password': self.password})
+            # print(r.headers)
+            # print(requests.MockRequest(r).get_new_headers().get('Cookie'))
+            # /!\ Very dirty, does not handle string cookies...
+            print(r.cookies)
+            self.cookie_string = " ".join(
+                [ "{}:{};".format(cookie,
+                                  self.session.cookies[cookie])
+                  for cookie in self.session.cookies.get_dict()]
+            )
+            print("cookie_string: {}".format(self.cookie_string))
             out_json = r.json()
             # Sanity checks, handle errors
             if not "redir" in out_json:
@@ -294,6 +310,9 @@ class Overleaf:
                 except KeyError:
                     raise ConnectException(out_json)
             self.overleaf_session = r.cookies["overleaf_session"]
+            # New cookie gke-route. Google kubernete routing?
+            # self.gke_route = r.cookies["gke-route"]
+            logger.debug("### Coockies: {}".format(r.cookies))
             logger.debug("The good overleaf session is {}".format(self.overleaf_session))
             if self.overleaf_session[0:2] != "s%":
                 logger.warning("The overleaf session does not start with s%, which is quite unusual...")
@@ -306,8 +325,9 @@ class Overleaf:
         """Get the zip file associated with a given project"""
         try:
             logger.info('#### Getting the zip for project {}'.format(self.url_project))
-            r = requests.get('{}download/zip'.format(self.url_project),
-                             cookies = {'overleaf_session': self.overleaf_session})
+            r = self.session.get('{}download/zip'.format(self.url_project),
+                             # cookies = {'overleaf_session': self.overleaf_session}
+            )
             with open(outputfile, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=1024): 
                     if chunk:
@@ -330,16 +350,24 @@ class Overleaf:
             return self.file_tree
         logger.info("#### Getting list of files and folders of the project {}".format(self.url_project))
         try:
-            r = requests.get('https://www.overleaf.com/socket.io/1/',
-                             cookies = {'overleaf_session': self.overleaf_session,
-                                        'SERVERID': 'sl-lin-prod-web-5'}
+            print("Jar: {}".format(self.session.cookies))
+            r = self.session.get('https://www.overleaf.com/socket.io/1/',
+                             # cookies = {'overleaf_session': self.overleaf_session,
+                                        # 'SERVERID': 'sl-lin-prod-web-5'}
             )
             logger.debug("request to get io: {}".format(r.text))
             socket_url = r.text.split(':')[0]
             full_wsurl = "wss://www.overleaf.com/socket.io/1/websocket/{}".format(socket_url)
             logger.debug("full_wsurl: {}".format(full_wsurl))
+            # ws_cookie = "SERVERID=sl-lin-prod-web-5;gke-route={};overleaf_session={};".format(self.gke_route, self.overleaf_session)
+            # logger.debug("websocat {} -H \'Cookie: {}\'".format(full_wsurl, ws_cookie))
+            ws_cookie = self.cookie_string
+            logger.debug("websocat {} -H \'Cookie: {}\'".format(full_wsurl, ws_cookie))
+            # exit(1)
             ws = create_connection(full_wsurl,
-                                   cookie = "SERVERID=sl-lin-prod-web-5; overleaf_session={};".format(self.overleaf_session))
+                                   extra_headers=[('Cookie', ws_cookie)])
+                                   # cookie = self.session.cookies)
+                                   # cookie = ws_cookie)
             out_json = None
             while True:
                 logger.debug("Waiting to receive a message...")
@@ -417,10 +445,10 @@ class Overleaf:
                     raise FileDoesNotExistSoNoRemove(e) from e
         logger.debug("I will delete id {}.".format(_id))
         mid_url = elt['file_type'] + "/"
-        r = requests.delete("{}{}{}".format(self.url_project,
+        r = self.session.delete("{}{}{}".format(self.url_project,
                                             mid_url,
                                             _id),
-                            cookies = {'overleaf_session': self.overleaf_session},
+                            # cookies = {'overleaf_session': self.overleaf_session},
                             headers = {'Accept': 'application/json, text/plain, */*',
                                        'X-Csrf-Token': self.csrf_token})
         logger.debug(curlify.to_curl(r.request))
@@ -453,13 +481,13 @@ class Overleaf:
             else:
                 logger.debug("The folder {} does not exist. Let's create it!".format(new_path))
                 parent_id=ft.get_element(path)['_id']
-                r = requests.post(self.url_project + 'folder',
-                                  cookies = {'overleaf_session': self.overleaf_session},
-                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
-                                             'Accept': 'application/json, text/plain, */*'},
-                                  json = {'_csrf': self.csrf_token,
-                                          'parent_folder_id': parent_id,
-                                          'name': p})
+                r = self.session.post(self.url_project + 'folder',
+                                      # cookies = {'overleaf_session': self.overleaf_session},
+                                      headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                                 'Accept': 'application/json, text/plain, */*'},
+                                      json = {'_csrf': self.csrf_token,
+                                              'parent_folder_id': parent_id,
+                                              'name': p})
                 logger.debug(curlify.to_curl(r.request))
                 if "file already exists" in r.text:
                     ### If the file already exist, it means that the file has been created meanwhile, so let's try again! (NB: that is quite unlikely to happen when force_reload=False)
@@ -587,12 +615,12 @@ class Overleaf:
                 url = '{}{}{}/rename'.format(self.url_project,
                                              mid_url,
                                              src_elt['_id'])
-                r = requests.post(url,
-                                  cookies = {'overleaf_session': self.overleaf_session},
-                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
-                                             'Accept': 'application/json, text/plain, */*'},
-                                  json = {'name': prefix + src_elt['name'],
-                                          '_csrf': self.csrf_token})
+                r = self.session.post(url,
+                                      # cookies = {'overleaf_session': self.overleaf_session},
+                                      headers = {'Content-Type': 'application/json;charset=UTF-8',
+                                                 'Accept': 'application/json, text/plain, */*'},
+                                      json = {'name': prefix + src_elt['name'],
+                                              '_csrf': self.csrf_token})
                 if r.text:
                     # Error, as r.text should output nothing
                     logger.debug(curlify.to_curl(r.request))
@@ -614,12 +642,12 @@ class Overleaf:
             url = '{}{}{}/move'.format(self.url_project,
                                        mid_url,
                                        src_elt['_id'])
-            r = requests.post(url,
-                              cookies = {'overleaf_session': self.overleaf_session},
-                              headers = {'Content-Type': 'application/json;charset=UTF-8',
+            r = self.session.post(url,
+                                  # cookies = {'overleaf_session': self.overleaf_session},
+                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
                                          'Accept': 'application/json, text/plain, */*'},
-                              json = {'folder_id': dst_elt['_id'],
-                                      '_csrf': self.csrf_token})
+                                  json = {'folder_id': dst_elt['_id'],
+                                          '_csrf': self.csrf_token})
             if r.text:
                 # Error, as r.text should output nothing
                 logger.debug(curlify.to_curl(r.request))
@@ -644,12 +672,12 @@ class Overleaf:
             url = '{}{}{}/rename'.format(self.url_project,
                                          mid_url,
                                          src_elt['_id'])
-            r = requests.post(url,
-                              cookies = {'overleaf_session': self.overleaf_session},
-                              headers = {'Content-Type': 'application/json;charset=UTF-8',
+            r = self.session.post(url,
+                                  # cookies = {'overleaf_session': self.overleaf_session},
+                                  headers = {'Content-Type': 'application/json;charset=UTF-8',
                                          'Accept': 'application/json, text/plain, */*'},
-                              json = {'name': new_name,
-                                      '_csrf': self.csrf_token})
+                                  json = {'name': new_name,
+                                          '_csrf': self.csrf_token})
             if r.text:
                 # Error, as r.text should output nothing
                 logger.debug(curlify.to_curl(r.request))
@@ -691,9 +719,9 @@ class Overleaf:
         logger.debug("path_id: {}".format(path_id))
         # Upload the file
         content = open(local_path_name, 'rb') if local_path_name else string_content
-        r = requests.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id['_id'], self.csrf_token),
-                          cookies = {'overleaf_session': self.overleaf_session},
-                  files = {'qqfile': (online_filename, content)})
+        r = self.session.post("{}upload?folder_id={}&_csrf={}".format(self.url_project, path_id['_id'], self.csrf_token),
+                              # cookies = {'overleaf_session': self.overleaf_session},
+                              files = {'qqfile': (online_filename, content)})
         logger.debug(curlify.to_curl(r.request))
         logger.debug(r.text)
         try:
