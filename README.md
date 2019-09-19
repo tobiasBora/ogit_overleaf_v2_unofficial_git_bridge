@@ -1,5 +1,7 @@
 # Ogit: overleaf v2 unofficial git bridge
 
+/!\ ERROR: This code does not work anymore as overleaf seems to have changed some stuff. However, it's not yet clear why the script can't connect to the websocket even with all the credentials... If you have some ideas, feel free to share [here](https://github.com/tobiasBora/ogit_overleaf_v2_unofficial_git_bridge/issues/1) /!\
+
 WARNING: This repo has not yet be tested a lot. It comes without any warantee, and you could lose with it all your project, or even block it. To avoid such disaster, first test the project on dummy projects, do backups, and be aware that ogit always try to backup the project at every command you do in a folder `.ogit_svg`.
 
 The goal of this project is to emulate the git bridge of the paid plan of overleaf v2 for free. It handle synchronization in both directions between a local git repo and an online overleaf v2 project. You should also be able to sync your repo with an external git repository, but you should manually do it for now with git. In the futur, it may be possible to sync with overleaf and with an external git repository in one command.
