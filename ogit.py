@@ -352,9 +352,12 @@ class Overleaf:
         try:
             print("Jar: {}".format(self.session.cookies))
             r = self.session.get('https://www.overleaf.com/socket.io/1/',
+                                 params = {'t': 1568856483734},
+                                 
                              # cookies = {'overleaf_session': self.overleaf_session,
                                         # 'SERVERID': 'sl-lin-prod-web-5'}
             )
+            logger.debug(curlify.to_curl(r.request))
             logger.debug("request to get io: {}".format(r.text))
             socket_url = r.text.split(':')[0]
             full_wsurl = "wss://www.overleaf.com/socket.io/1/websocket/{}".format(socket_url)
